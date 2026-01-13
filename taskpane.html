@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Avanti Anonymizer</title>
+    <link rel="stylesheet" href="taskpane.css">
+    <script src="https://appsforoffice.microsoft.com/lib/1.1/hosted/office.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <img src="assets/icon-32.png" alt="Avanti" class="logo">
+            <h1>Anonymizer</h1>
+        </header>
+
+        <!-- Status message -->
+        <div id="status" class="status hidden"></div>
+
+        <!-- Step 1: Scan -->
+        <section id="scan-section" class="section">
+            <p class="description">
+                Skanna presentationen för att hitta känslig information som kundnamn,
+                personnamn, e-postadresser och konfidentiella siffror.
+            </p>
+            <button id="scan-btn" class="btn btn-primary">
+                <span class="btn-icon">🔍</span>
+                Skanna presentation
+            </button>
+        </section>
+
+        <!-- Step 2: Review findings -->
+        <section id="findings-section" class="section hidden">
+            <div class="findings-header">
+                <h2>Hittade <span id="findings-count">0</span> potentiellt känsliga objekt</h2>
+                <button id="select-all-btn" class="btn btn-small">Välj alla</button>
+            </div>
+
+            <div id="findings-list" class="findings-list">
+                <!-- Findings will be inserted here -->
+            </div>
+
+            <div class="actions">
+                <button id="anonymize-btn" class="btn btn-primary" disabled>
+                    <span class="btn-icon">🔒</span>
+                    Anonymisera valda
+                </button>
+                <button id="rescan-btn" class="btn btn-secondary">
+                    Skanna igen
+                </button>
+            </div>
+        </section>
+
+        <!-- Step 3: Done -->
+        <section id="done-section" class="section hidden">
+            <div class="done-message">
+                <span class="done-icon">✅</span>
+                <h2>Anonymisering klar!</h2>
+                <p><span id="replaced-count">0</span> objekt har ersatts.</p>
+            </div>
+            <button id="new-scan-btn" class="btn btn-secondary">
+                Skanna igen
+            </button>
+        </section>
+
+        <!-- Loading overlay -->
+        <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <p id="loading-text">Skannar...</p>
+        </div>
+    </div>
+
+    <script src="taskpane.js"></script>
+</body>
+</html>
