@@ -80,41 +80,24 @@ async function extractAllText() {
         slideCollection.load('items');
         await context.sync();
 
-        // Load all shapes for all slides in one batch
-        const allShapes = [];
-        for (const slide of slideCollection.items) {
-            slide.shapes.load('items,id,type');
-            allShapes.push(slide.shapes);
-        }
-        await context.sync();
-
-        // Process each slide and shape, loading text where possible
         for (let i = 0; i < slideCollection.items.length; i++) {
-            const shapes = allShapes[i];
+            const slide = slideCollection.items[i];
+            const shapes = slide.shapes;
+            shapes.load('items');
+            await context.sync();
+
             const slideTexts = [];
 
+            // Process each shape individually with error handling
             for (let j = 0; j < shapes.items.length; j++) {
-                const shape = shapes.items[j];
-
-                // Try to get text from shape
                 try {
-                    shape.textFrame.textRange.load('text');
-                } catch (e) {
-                    // Shape doesn't support textFrame, skip
-                }
-            }
+                    const shape = shapes.items[j];
+                    const textFrame = shape.textFrame;
+                    const textRange = textFrame.textRange;
+                    textRange.load('text');
+                    await context.sync();
 
-            try {
-                await context.sync();
-            } catch (e) {
-                // Some shapes failed, continue anyway
-            }
-
-            // Now collect the text
-            for (let j = 0; j < shapes.items.length; j++) {
-                const shape = shapes.items[j];
-                try {
-                    const text = shape.textFrame.textRange.text;
+                    const text = textRange.text;
                     if (text && text.trim()) {
                         slideTexts.push({
                             shapeIndex: j,
@@ -122,7 +105,8 @@ async function extractAllText() {
                         });
                     }
                 } catch (e) {
-                    // No text in this shape
+                    // Shape has no text frame or text, skip it
+                    continue;
                 }
             }
 
