@@ -2,7 +2,7 @@
 // Skannar och anonymiserar känslig information i PowerPoint-presentationer
 
 const SUPABASE_URL = 'https://vnjcwffdhywckwnjothu.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZuamN3ZmZkaHl3Y2t3bmpvdGh1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDY2MzYyMzEsImV4cCI6MjA2MjIxMjIzMX0.b2t6JvhIRKOe_-PINJ7vJKqhWgAy6TRWU7_T7o-lbyI';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZuamN3ZmZkaHl3Y2t3bmpvdGh1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU4NjA4MTAsImV4cCI6MjA4MTQzNjgxMH0.ETCptr-BYt7wunTOXVAsBCsv9L9kICR30GGHoC5X3ZQ';
 
 // State
 let findings = [];
