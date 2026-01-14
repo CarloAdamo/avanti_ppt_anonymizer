@@ -80,39 +80,68 @@ async function extractAllText() {
         slideCollection.load('items');
         await context.sync();
 
+        // Load all shapes for all slides in one batch
+        const allShapes = [];
+        for (const slide of slideCollection.items) {
+            slide.shapes.load('items');
+            allShapes.push(slide.shapes);
+        }
+        await context.sync();
+
+        // Load all text from all shapes in one batch
+        const shapeTextMap = [];
         for (let i = 0; i < slideCollection.items.length; i++) {
-            const slide = slideCollection.items[i];
-            const shapes = slide.shapes;
-            shapes.load('items');
-            await context.sync();
-
-            const slideTexts = [];
-
+            const shapes = allShapes[i];
             for (let j = 0; j < shapes.items.length; j++) {
                 const shape = shapes.items[j];
                 try {
-                    shape.textFrame.textRange.load('text');
-                    await context.sync();
-
-                    const text = shape.textFrame.textRange.text;
-                    if (text && text.trim()) {
-                        slideTexts.push({
-                            shapeIndex: j,
-                            text: text
-                        });
-                    }
+                    shape.textFrame.load('hasText');
+                    shapeTextMap.push({ slideIndex: i, shapeIndex: j, shape });
                 } catch (e) {
-                    // Shape has no text frame, skip
+                    // Shape doesn't support textFrame
                 }
             }
+        }
+        await context.sync();
 
-            if (slideTexts.length > 0) {
-                slides.push({
-                    slideIndex: i,
-                    texts: slideTexts
-                });
+        // Now load text only for shapes that have text
+        const textShapes = [];
+        for (const item of shapeTextMap) {
+            try {
+                if (item.shape.textFrame.hasText) {
+                    item.shape.textFrame.textRange.load('text');
+                    textShapes.push(item);
+                }
+            } catch (e) {
+                // Skip shapes without text
             }
         }
+        await context.sync();
+
+        // Collect results
+        const slideTextsMap = new Map();
+        for (const item of textShapes) {
+            try {
+                const text = item.shape.textFrame.textRange.text;
+                if (text && text.trim()) {
+                    if (!slideTextsMap.has(item.slideIndex)) {
+                        slideTextsMap.set(item.slideIndex, []);
+                    }
+                    slideTextsMap.get(item.slideIndex).push({
+                        shapeIndex: item.shapeIndex,
+                        text: text
+                    });
+                }
+            } catch (e) {
+                // Skip
+            }
+        }
+
+        // Convert to array
+        for (const [slideIndex, texts] of slideTextsMap) {
+            slides.push({ slideIndex, texts });
+        }
+        slides.sort((a, b) => a.slideIndex - b.slideIndex);
     });
 
     return slides;
