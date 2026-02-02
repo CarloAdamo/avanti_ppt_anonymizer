@@ -73,7 +73,6 @@ export async function replaceAllShapes(slideData, rewrites) {
                     const shape = shapes.items[t.shapeIndex];
                     const fontData = fontMap.get(key);
 
-                    let textFrame;
                     if (t.row !== undefined && t.groupChildIndex !== undefined) {
                         // Table cell within a group
                         const group = shape.group;
@@ -81,13 +80,24 @@ export async function replaceAllShapes(slideData, rewrites) {
                         childShapes.load('items');
                         await context.sync();
                         const child = childShapes.items[t.groupChildIndex];
-                        const cell = child.table.getCell(t.row, t.col);
-                        textFrame = cell.body;
+                        const table = child.getTable();
+                        const cell = table.getCellOrNullObject(t.row, t.col);
+                        cell.text = newText;
+                        await context.sync();
+                        count++;
+                        continue;
                     } else if (t.row !== undefined) {
                         // Table cell
-                        const cell = shape.table.getCell(t.row, t.col);
-                        textFrame = cell.body;
-                    } else if (t.groupChildIndex !== undefined) {
+                        const table = shape.getTable();
+                        const cell = table.getCellOrNullObject(t.row, t.col);
+                        cell.text = newText;
+                        await context.sync();
+                        count++;
+                        continue;
+                    }
+
+                    let textFrame;
+                    if (t.groupChildIndex !== undefined) {
                         // Text shape within a group
                         const group = shape.group;
                         const childShapes = group.shapes;

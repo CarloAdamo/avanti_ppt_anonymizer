@@ -192,49 +192,30 @@ async function extractTextShape(shape, shapeIndex, context, slideTexts, canCaptu
 }
 
 async function extractTableCells(shape, shapeIndex, context, slideTexts, pptxCells) {
-    // Try Office.js Table API first (works in some environments)
+    // Try getTable() API (documented method)
     try {
-        const table = shape.table;
-        if (!table) throw new Error('shape.table is undefined');
-
-        table.rows.load('count');
-        const firstRow = table.rows.getItemAt(0);
-        firstRow.load('cellCount');
+        const table = shape.getTable();
+        table.load('rowCount, columnCount');
         await context.sync();
 
-        const rowCount = table.rows.count;
-        const colCount = firstRow.cellCount;
+        const allCells = [];
+        for (let r = 0; r < table.rowCount; r++) {
+            for (let c = 0; c < table.columnCount; c++) {
+                const cell = table.getCellOrNullObject(r, c);
+                cell.load('text');
+                allCells.push({ row: r, col: c, cell });
+            }
+        }
+        await context.sync();
 
-        for (let r = 0; r < rowCount; r++) {
-            try {
-                const rowCells = [];
-                for (let c = 0; c < colCount; c++) {
-                    try {
-                        const cell = table.getCell(r, c);
-                        cell.body.textRange.load('text');
-                        rowCells.push({ row: r, col: c, cell });
-                    } catch (e) {
-                        // Merged or inaccessible cell
-                    }
-                }
-                await context.sync();
-                for (const { row, col, cell } of rowCells) {
-                    try {
-                        const text = cell.body.textRange.text;
-                        if (text && text.trim()) {
-                            slideTexts.push({ shapeIndex, text, fontData: null, row, col });
-                        }
-                    } catch (e) {
-                        // Cell text couldn't be read
-                    }
-                }
-            } catch (e) {
-                console.warn(`Table row ${r} extraction failed:`, e.message);
+        for (const { row, col, cell } of allCells) {
+            if (!cell.isNullObject && cell.text && cell.text.trim()) {
+                slideTexts.push({ shapeIndex, text: cell.text, fontData: null, row, col });
             }
         }
         return; // API succeeded
     } catch (e) {
-        console.warn(`Table API unavailable for shape ${shapeIndex}:`, e.message);
+        console.warn(`getTable() failed for shape ${shapeIndex}:`, e.message);
     }
 
     // Fallback: use pre-parsed PPTX table data
@@ -273,54 +254,24 @@ async function extractGroupShapes(shape, shapeIndex, context, slideTexts, canCap
 
         try {
             if (childType === 'Table') {
-                // Table within a group — extract cells but tag with groupChildIndex
-                try {
-                    const childTable = child.table;
-                    childTable.rows.load('count');
-                    const childFirstRow = childTable.rows.getItemAt(0);
-                    childFirstRow.load('cellCount');
-                    await context.sync();
+                // Table within a group — use getTable() API
+                const childTable = child.getTable();
+                childTable.load('rowCount, columnCount');
+                await context.sync();
 
-                    const rowCount = childTable.rows.count;
-                    const colCount = childFirstRow.cellCount;
-
-                    // Per-row sync: each row is independent
-                    for (let r = 0; r < rowCount; r++) {
-                        try {
-                            const rowCells = [];
-                            for (let c = 0; c < colCount; c++) {
-                                try {
-                                    const cell = childTable.getCell(r, c);
-                                    cell.body.textRange.load('text');
-                                    rowCells.push({ row: r, col: c, cell });
-                                } catch (e) { /* merged cell */ }
-                            }
-                            await context.sync();
-                            for (const { row, col, cell } of rowCells) {
-                                try {
-                                    const text = cell.body.textRange.text;
-                                    if (text && text.trim()) {
-                                        slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData: null, row, col });
-                                    }
-                                } catch (e) { /* skip */ }
-                            }
-                        } catch (e) {
-                            console.warn(`Group table row ${r} extraction failed:`, e.message);
-                        }
+                const allCells = [];
+                for (let r = 0; r < childTable.rowCount; r++) {
+                    for (let c = 0; c < childTable.columnCount; c++) {
+                        const cell = childTable.getCellOrNullObject(r, c);
+                        cell.load('text');
+                        allCells.push({ row: r, col: c, cell });
                     }
-                } catch (e) {
-                    // Table API unavailable — try textFrame fallback
-                    console.warn(`Group table API failed for child ${k}:`, e.message);
-                    try {
-                        const textRange = child.textFrame.textRange;
-                        textRange.load('text');
-                        await context.sync();
-                        const text = textRange.text;
-                        if (text && text.trim()) {
-                            slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData: null });
-                        }
-                    } catch (e2) {
-                        console.warn(`Group child ${k} (Table): both table API and textFrame failed — skipping`);
+                }
+                await context.sync();
+
+                for (const { row, col, cell } of allCells) {
+                    if (!cell.isNullObject && cell.text && cell.text.trim()) {
+                        slideTexts.push({ shapeIndex, groupChildIndex: k, text: cell.text, fontData: null, row, col });
                     }
                 }
             } else {
