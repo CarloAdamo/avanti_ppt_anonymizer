@@ -114,14 +114,20 @@ async function extractTableCells(shape, shapeIndex, context, slideTexts) {
         }
     } catch (e) {
         // Table API unavailable (proxy returned but sync throws InvalidArgument)
-        // Fall back to textFrame which gives concatenated table text
-        console.log(`Table cell API failed for shape ${shapeIndex}, using textFrame fallback:`, e.message);
-        const textRange = shape.textFrame.textRange;
-        textRange.load('text');
-        await context.sync();
-        const text = textRange.text;
-        if (text && text.trim()) {
-            slideTexts.push({ shapeIndex, text, fontData: null });
+        // Fall back to textFrame which may give concatenated table text
+        console.warn(`Table cell API failed for shape ${shapeIndex}:`, e.message);
+        try {
+            const textRange = shape.textFrame.textRange;
+            textRange.load('text');
+            await context.sync();
+            const text = textRange.text;
+            if (text && text.trim()) {
+                console.log(`Shape ${shapeIndex}: recovered table text via textFrame`);
+                slideTexts.push({ shapeIndex, text, fontData: null });
+            }
+        } catch (e2) {
+            // Both table API and textFrame failed — nothing more we can do
+            console.warn(`Shape ${shapeIndex} (Table): both table API and textFrame failed — skipping`);
         }
     }
 }
@@ -181,14 +187,18 @@ async function extractGroupShapes(shape, shapeIndex, context, slideTexts, canCap
                         }
                     }
                 } catch (e) {
-                    // Table API unavailable — fall back to textFrame
-                    console.log(`Group table API failed for child ${k}, using textFrame fallback:`, e.message);
-                    const textRange = child.textFrame.textRange;
-                    textRange.load('text');
-                    await context.sync();
-                    const text = textRange.text;
-                    if (text && text.trim()) {
-                        slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData: null });
+                    // Table API unavailable — try textFrame fallback
+                    console.warn(`Group table API failed for child ${k}:`, e.message);
+                    try {
+                        const textRange = child.textFrame.textRange;
+                        textRange.load('text');
+                        await context.sync();
+                        const text = textRange.text;
+                        if (text && text.trim()) {
+                            slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData: null });
+                        }
+                    } catch (e2) {
+                        console.warn(`Group child ${k} (Table): both table API and textFrame failed — skipping`);
                     }
                 }
             } else {
