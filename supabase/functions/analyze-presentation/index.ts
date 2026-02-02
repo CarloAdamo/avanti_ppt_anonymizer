@@ -6,16 +6,18 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-interface TextItem {
+interface ShapeItem {
   slideIndex: number;
   shapeIndex: number;
-  text: string;
+  text?: string;
+  paragraphs?: string[];
 }
 
-interface RewriteItem {
+interface Classification {
   slideIndex: number;
   shapeIndex: number;
-  rewrittenText: string;
+  category: string;
+  label?: string;
 }
 
 Deno.serve(async (req: Request) => {
@@ -30,52 +32,41 @@ Deno.serve(async (req: Request) => {
       throw new Error("OPENAI_API_KEY not configured");
     }
 
-    const { texts } = await req.json() as { texts: TextItem[] };
+    const { shapes } = await req.json() as { shapes: ShapeItem[] };
 
-    if (!texts || texts.length === 0) {
+    if (!shapes || shapes.length === 0) {
       return new Response(
-        JSON.stringify({ rewrites: [] }),
+        JSON.stringify({ classifications: [] }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Prepare context for GPT
-    const textEntries = texts.map(t =>
-      `{ "slideIndex": ${t.slideIndex}, "shapeIndex": ${t.shapeIndex}, "text": ${JSON.stringify(t.text)} }`
-    ).join(",\n");
+    // Prepare shapes for GPT
+    const shapeEntries = shapes.map(s => {
+      const content = s.paragraphs
+        ? `"paragraphs": ${JSON.stringify(s.paragraphs)}`
+        : `"text": ${JSON.stringify(s.text)}`;
+      return `{ "slideIndex": ${s.slideIndex}, "shapeIndex": ${s.shapeIndex}, ${content} }`;
+    }).join(",\n");
 
-    const systemPrompt = `Du är en expert på att anonymisera konsultpresentationer.
+    const systemPrompt = `Du klassificerar text från PowerPoint-shapes i konsultpresentationer.
 
-Du får text från enskilda shapes i en PowerPoint-presentation.
-Skriv om VARJE text så att ALL identifierande information ersätts med generiska platshållare.
+Kategorier:
+- title: Huvudrubrik på en slide
+- body: Beskrivande text, punktlistor, aktiviteter
+- name: Personnamn eller rollreferenser
+- label_value: "Etikett: Värde"-mönster (ange label-delen i "label"-fältet)
+- table_header: Kolumn-/radrubrik
+- keep: Redan generisk text som inte behöver ändras (t.ex. "Syfte", "Mål", "Agenda")
 
-Regler:
-- Företagsnamn → [Företag A], [Företag B] etc. (konsekvent genom hela presentationen)
-- Personnamn → [Projektledare], [Kontaktperson], [Konsult] etc.
-- E-postadresser → [email]
-- Telefonnummer → [telefon]
-- Specifika belopp → [X MSEK], [belopp] etc.
-- Specifika procent → [X]%
-- Datum → [datum] eller [kvartal] etc.
-- Adresser → [adress]
-- Projektnamn/kodnamn → [Projekt A], [Projekt B] etc.
+Svara med JSON: { "classifications": [{ "slideIndex": 0, "shapeIndex": 0, "category": "title" }] }
+För label_value, inkludera "label"-fält: { "slideIndex": 0, "shapeIndex": 5, "category": "label_value", "label": "Driver" }
 
-KRITISKT:
-- Behåll EXAKT samma antal rader (radbrytningar) i varje text
-- Behåll samma struktur, ton och längd
-- Text som redan är generisk eller inte innehåller känslig info ska returneras oförändrad
-- Var konsekvent — samma företag ska alltid bli samma platshållare
+Klassificera BARA, generera INGEN ny text.`;
 
-Svara ENDAST med giltig JSON i följande format:
-{
-  "rewrites": [
-    { "slideIndex": 0, "shapeIndex": 0, "rewrittenText": "..." }
-  ]
-}`;
+    const userPrompt = `Klassificera följande shapes:
 
-    const userPrompt = `Anonymisera följande texter från en presentation. Returnera en omskrivning per shape:
-
-[${textEntries}]`;
+[${shapeEntries}]`;
 
     // Call OpenAI API
     const openaiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -90,7 +81,7 @@ Svara ENDAST med giltig JSON i följande format:
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
         ],
-        temperature: 0.1,
+        temperature: 0,
         response_format: { type: "json_object" }
       }),
     });
@@ -109,14 +100,18 @@ Svara ENDAST med giltig JSON i följande format:
     }
 
     const parsed = JSON.parse(content);
-    const rewrites: RewriteItem[] = (parsed.rewrites || []).map((r: RewriteItem) => ({
-      slideIndex: r.slideIndex,
-      shapeIndex: r.shapeIndex,
-      rewrittenText: r.rewrittenText,
-    }));
+    const classifications: Classification[] = (parsed.classifications || []).map((c: Classification) => {
+      const item: Classification = {
+        slideIndex: c.slideIndex,
+        shapeIndex: c.shapeIndex,
+        category: c.category,
+      };
+      if (c.label) item.label = c.label;
+      return item;
+    });
 
     return new Response(
-      JSON.stringify({ rewrites }),
+      JSON.stringify({ classifications }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
 

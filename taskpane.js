@@ -1,8 +1,67 @@
 // Avanti PPT Anonymizer
-// Anonymiserar presentationer genom att skriva om text med AI
+// Generaliserar presentationer med klassificering + platshållare
 
 const SUPABASE_URL = 'https://vnjcwffdhywckwnjothu.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZuamN3ZmZkaHl3Y2t3bmpvdGh1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU4NjA4MTAsImV4cCI6MjA4MTQzNjgxMH0.ETCptr-BYt7wunTOXVAsBCsv9L9kICR30GGHoC5X3ZQ';
+
+// ============================================
+// CONSTANTS
+// ============================================
+
+const SECTION_LABELS = new Set([
+    'syfte', 'mål', 'bakgrund', 'agenda', 'sammanfattning',
+    'nästa steg', 'tidplan', 'organisation', 'risker',
+    'budget', 'resurser', 'bilagor', 'innehåll', 'analys',
+    'resultat', 'slutsats', 'rekommendationer', 'översikt',
+    'introduktion', 'diskussion', 'metod', 'uppföljning'
+]);
+
+const PLACEHOLDER_MAP = {
+    title:       '[Rubrik]',
+    body:        '[Beskrivning]',
+    name:        '[Namn]',
+    number:      '[Värde]',
+    initials:    '[Initialer]',
+    email:       '[email]',
+    phone:       '[telefon]',
+    url:         '[URL]',
+    date:        '[Period]',
+};
+
+// ============================================
+// LOCAL CLASSIFICATION PATTERNS
+// ============================================
+
+const LOCAL_PATTERNS = [
+    {
+        category: 'email',
+        test: (text) => /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(text.trim())
+    },
+    {
+        category: 'phone',
+        test: (text) => /^(?:\+46|0)[\s-]?(?:\d[\s-]?){8,11}$/.test(text.trim())
+    },
+    {
+        category: 'url',
+        test: (text) => /^https?:\/\/[^\s]+$/.test(text.trim())
+    },
+    {
+        category: 'initials',
+        test: (text) => /^[A-ZÅÄÖ]{2,3}(?:\s*[+&,]\s*[A-ZÅÄÖ]{2,3})+$/.test(text.trim())
+    },
+    {
+        category: 'date',
+        test: (text) => /^(?:Q[1-4]\s*\d{4}|\d{4}-\d{2}-\d{2}|\d{4}-\d{2}|\d{1,2}\/\d{1,2}[\/-]\d{2,4}|(?:jan|feb|mar|apr|maj|jun|jul|aug|sep|okt|nov|dec)\w*\s+\d{4})$/i.test(text.trim())
+    },
+    {
+        category: 'number',
+        test: (text) => /^\d+(?:[,.\s]\d{3})*(?:[,.\s]\d+)?\s*(?:kr|SEK|MSEK|TSEK|EUR|USD|miljoner|miljarder|st|%|kkr|mkr|mdr)$/i.test(text.trim())
+    },
+    {
+        category: 'section_label',
+        test: (text) => SECTION_LABELS.has(text.trim().toLowerCase())
+    }
+];
 
 // Initialize Office
 Office.onReady((info) => {
@@ -34,16 +93,31 @@ async function anonymizePresentation() {
             return;
         }
 
-        showLoading('AI skriver om text...');
-        const rewrites = await anonymizeWithAI(slideData);
+        showLoading('Klassificerar text...');
+        const { classified, unclassified } = classifyLocally(slideData);
+
+        let aiClassifications = [];
+        if (unclassified.length > 0) {
+            try {
+                showLoading('AI klassificerar text...');
+                aiClassifications = await classifyWithAI(unclassified);
+            } catch (error) {
+                console.warn('AI classification unavailable, using fallback:', error);
+                aiClassifications = fallbackClassify(unclassified);
+            }
+        }
+
+        const allClassifications = [...classified, ...aiClassifications];
+
+        showLoading('Ersätter text...');
+        const rewrites = buildRewrites(slideData, allClassifications);
 
         if (rewrites.length === 0) {
             hideLoading();
-            showStatus('Ingen text behövde anonymiseras.', 'success');
+            showStatus('Ingen text behövde generaliseras.', 'success');
             return;
         }
 
-        showLoading('Ersätter text...');
         const count = await replaceAllShapes(slideData, rewrites);
 
         hideLoading();
@@ -167,69 +241,172 @@ async function captureFormatting(shape, context) {
 }
 
 // ============================================
-// AI ANONYMIZATION
+// LOCAL CLASSIFICATION
 // ============================================
 
-async function anonymizeWithAI(slideData) {
-    const texts = slideData.flatMap(slide =>
-        slide.texts.map(t => ({
-            slideIndex: slide.slideIndex,
-            shapeIndex: t.shapeIndex,
-            text: t.text
-        }))
-    );
+function classifyLocally(slideData) {
+    const classified = [];
+    const unclassified = [];
 
-    try {
-        const response = await fetch(`${SUPABASE_URL}/functions/v1/analyze-presentation`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-            },
-            body: JSON.stringify({ texts })
-        });
+    for (const slide of slideData) {
+        for (const t of slide.texts) {
+            const text = t.text;
+            let matched = false;
 
-        if (!response.ok) {
-            throw new Error('AI analysis failed');
+            for (const pattern of LOCAL_PATTERNS) {
+                if (pattern.test(text)) {
+                    classified.push({
+                        slideIndex: slide.slideIndex,
+                        shapeIndex: t.shapeIndex,
+                        category: pattern.category
+                    });
+                    matched = true;
+                    break;
+                }
+            }
+
+            if (!matched) {
+                // Check individual paragraphs for mixed content
+                const paragraphs = text.split('\r');
+                const hasLocalMatch = paragraphs.some(p =>
+                    p.trim() && LOCAL_PATTERNS.some(pat => pat.test(p))
+                );
+
+                if (hasLocalMatch) {
+                    // Shape has some locally-classifiable paragraphs but also other content
+                    // Send to AI for proper whole-shape classification
+                    unclassified.push({
+                        slideIndex: slide.slideIndex,
+                        shapeIndex: t.shapeIndex,
+                        text: text,
+                        paragraphs: paragraphs.filter(p => p.trim())
+                    });
+                } else {
+                    unclassified.push({
+                        slideIndex: slide.slideIndex,
+                        shapeIndex: t.shapeIndex,
+                        text: text,
+                        paragraphs: paragraphs.filter(p => p.trim())
+                    });
+                }
+            }
         }
-
-        const result = await response.json();
-        return result.rewrites || [];
-
-    } catch (error) {
-        console.warn('AI analysis unavailable, using local patterns:', error);
-        return rewriteWithPatterns(texts);
     }
+
+    return { classified, unclassified };
 }
 
-// Local pattern-based rewrite (fallback)
-function rewriteWithPatterns(texts) {
-    const patterns = [
-        { regex: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, replacement: '[email]' },
-        { regex: /(?:\+46|0)[\s-]?(?:\d[\s-]?){8,11}/g, replacement: '[telefon]' },
-        { regex: /\d{6,8}[-\s]?\d{4}/g, replacement: '[personnummer]' },
-        { regex: /\d+(?:[,.\s]\d{3})*(?:[,.\s]\d+)?\s*(?:kr|SEK|MSEK|TSEK|EUR|USD|miljoner|miljarder)/gi, replacement: '[belopp]' },
-        { regex: /\d+(?:[,.]\d+)?\s*%/g, replacement: '[X]%' },
-        { regex: /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi, replacement: '[URL]' }
-    ];
+// ============================================
+// AI CLASSIFICATION
+// ============================================
+
+async function classifyWithAI(shapes) {
+    const payload = shapes.map(s => {
+        const item = { slideIndex: s.slideIndex, shapeIndex: s.shapeIndex };
+        if (s.paragraphs && s.paragraphs.length > 1) {
+            item.paragraphs = s.paragraphs;
+        } else {
+            item.text = s.text;
+        }
+        return item;
+    });
+
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/analyze-presentation`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+        },
+        body: JSON.stringify({ shapes: payload })
+    });
+
+    if (!response.ok) {
+        throw new Error('AI classification failed');
+    }
+
+    const result = await response.json();
+    return result.classifications || [];
+}
+
+// Fallback when AI is unavailable: classify all unclassified as 'body'
+function fallbackClassify(unclassified) {
+    return unclassified.map(s => ({
+        slideIndex: s.slideIndex,
+        shapeIndex: s.shapeIndex,
+        category: 'body'
+    }));
+}
+
+// ============================================
+// BUILD REWRITES FROM CLASSIFICATIONS
+// ============================================
+
+function buildRewrites(slideData, classifications) {
+    const classMap = new Map();
+    for (const c of classifications) {
+        classMap.set(`${c.slideIndex}-${c.shapeIndex}`, c);
+    }
 
     const rewrites = [];
 
-    for (const item of texts) {
-        let rewritten = item.text;
-        for (const p of patterns) {
-            rewritten = rewritten.replace(p.regex, p.replacement);
-        }
-        if (rewritten !== item.text) {
-            rewrites.push({
-                slideIndex: item.slideIndex,
-                shapeIndex: item.shapeIndex,
-                rewrittenText: rewritten
-            });
+    for (const slide of slideData) {
+        for (const t of slide.texts) {
+            const key = `${slide.slideIndex}-${t.shapeIndex}`;
+            const classification = classMap.get(key);
+
+            if (!classification) continue;
+
+            const { category, label } = classification;
+
+            // Categories that should be kept as-is
+            if (category === 'keep' || category === 'table_header' || category === 'section_label') {
+                continue;
+            }
+
+            const text = t.text;
+            let rewrittenText;
+
+            if (category === 'body') {
+                // Replace each paragraph with [Beskrivning], preserve empty lines
+                const paragraphs = text.split('\r');
+                rewrittenText = paragraphs.map(p =>
+                    p.trim() ? PLACEHOLDER_MAP.body : ''
+                ).join('\r');
+            } else if (category === 'label_value') {
+                // Preserve the label part, replace the value
+                if (label) {
+                    // Try to find the label in the text and keep it
+                    const labelPattern = new RegExp(`^(${escapeRegex(label)}\\s*[:;]\\s*)`, 'i');
+                    const match = text.match(labelPattern);
+                    if (match) {
+                        rewrittenText = match[1] + '[Namn]';
+                    } else {
+                        rewrittenText = label + ': [Namn]';
+                    }
+                } else {
+                    rewrittenText = PLACEHOLDER_MAP.body;
+                }
+            } else if (PLACEHOLDER_MAP[category]) {
+                rewrittenText = PLACEHOLDER_MAP[category];
+            } else {
+                continue;
+            }
+
+            if (rewrittenText !== text) {
+                rewrites.push({
+                    slideIndex: slide.slideIndex,
+                    shapeIndex: t.shapeIndex,
+                    rewrittenText
+                });
+            }
         }
     }
 
     return rewrites;
+}
+
+function escapeRegex(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // ============================================
