@@ -194,9 +194,14 @@ async function extractTextShape(shape, shapeIndex, context, slideTexts, canCaptu
 async function extractTableCells(shape, shapeIndex, context, slideTexts, pptxCells) {
     // Try getTable() API (documented method)
     try {
+        if (typeof shape.getTable !== 'function') {
+            throw new Error('getTable() not available on this shape');
+        }
+        console.log(`Shape ${shapeIndex}: calling getTable()...`);
         const table = shape.getTable();
         table.load('rowCount, columnCount');
         await context.sync();
+        console.log(`Shape ${shapeIndex}: table loaded — ${table.rowCount} rows x ${table.columnCount} cols`);
 
         const allCells = [];
         for (let r = 0; r < table.rowCount; r++) {
@@ -353,15 +358,9 @@ export async function extractAllText() {
                         await extractTextShape(shape, j, context, slideTexts, canCaptureFormatting);
                     }
                 } catch (e) {
-                    // Primary extraction failed — try other methods as fallback
+                    // Primary extraction failed — try group fallback for unknown types
                     let recovered = false;
-                    if (shapeType !== 'Table') {
-                        try {
-                            await extractTableCells(shape, j, context, slideTexts, null);
-                            recovered = true;
-                        } catch (e2) { /* not a table */ }
-                    }
-                    if (!recovered && shapeType !== 'Group') {
+                    if (!shapeType && shapeType !== 'Group') {
                         try {
                             await extractGroupShapes(shape, j, context, slideTexts, canCaptureFormatting);
                             recovered = true;
