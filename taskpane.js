@@ -67,9 +67,11 @@ const LOCAL_PATTERNS = [
 // KEY HELPER
 // ============================================
 
-function makeKey(slideIndex, shapeIndex, row, col) {
-    if (row !== undefined) return `${slideIndex}-${shapeIndex}-${row}-${col}`;
-    return `${slideIndex}-${shapeIndex}`;
+function makeKey(slideIndex, shapeIndex, row, col, groupChildIndex) {
+    let key = `${slideIndex}-${shapeIndex}`;
+    if (groupChildIndex !== undefined) key += `-g${groupChildIndex}`;
+    if (row !== undefined) key += `-${row}-${col}`;
+    return key;
 }
 
 // Initialize Office
@@ -159,32 +161,50 @@ async function extractAllText() {
             shapes.load('items');
             await context.sync();
 
+            // Batch load shape types for dispatch
+            let typesLoaded = false;
+            try {
+                for (const s of shapes.items) {
+                    s.load('type');
+                }
+                await context.sync();
+                typesLoaded = true;
+            } catch (e) {
+                console.warn('Could not load shape types, using fallback detection');
+            }
+
             const slideTexts = [];
 
             for (let j = 0; j < shapes.items.length; j++) {
                 const shape = shapes.items[j];
+                let shapeType = null;
+                if (typesLoaded) {
+                    try { shapeType = shape.type; } catch (e) { /* ignore */ }
+                }
 
-                // Try as text shape first
                 try {
-                    const textRange = shape.textFrame.textRange;
-                    textRange.load('text');
-                    await context.sync();
-
-                    const text = textRange.text;
-                    if (text && text.trim()) {
-                        let fontData = null;
-                        if (canCaptureFormatting) {
-                            fontData = await captureFormatting(shape.textFrame, context);
-                        }
-                        slideTexts.push({ shapeIndex: j, text, fontData });
+                    if (shapeType === 'Table') {
+                        await extractTableCells(shape, j, context, slideTexts);
+                    } else if (shapeType === 'Group') {
+                        await extractGroupShapes(shape, j, context, slideTexts, canCaptureFormatting);
+                    } else {
+                        // Text shapes, unknown types, images (will throw) — try textFrame
+                        await extractTextShape(shape, j, context, slideTexts, canCaptureFormatting);
                     }
                 } catch (e) {
-                    // Not a text shape — try as table
-                    try {
-                        await extractTableCells(shape, j, context, slideTexts);
-                    } catch (e2) {
-                        // Neither text nor table, skip
-                        continue;
+                    // If type-based dispatch failed, try fallback cascade
+                    if (!typesLoaded) {
+                        try {
+                            await extractTableCells(shape, j, context, slideTexts);
+                        } catch (e2) {
+                            try {
+                                await extractGroupShapes(shape, j, context, slideTexts, canCaptureFormatting);
+                            } catch (e3) {
+                                continue;
+                            }
+                        }
+                    } else {
+                        console.warn(`Skipping shape ${j} (type: ${shapeType}):`, e.message);
                     }
                 }
             }
@@ -198,34 +218,124 @@ async function extractAllText() {
     return slides;
 }
 
+async function extractTextShape(shape, shapeIndex, context, slideTexts, canCaptureFormatting) {
+    const textRange = shape.textFrame.textRange;
+    textRange.load('text');
+    await context.sync();
+
+    const text = textRange.text;
+    if (text && text.trim()) {
+        let fontData = null;
+        if (canCaptureFormatting) {
+            fontData = await captureFormatting(shape.textFrame, context);
+        }
+        slideTexts.push({ shapeIndex, text, fontData });
+    }
+}
+
 async function extractTableCells(shape, shapeIndex, context, slideTexts) {
     const table = shape.table;
-    table.rows.load('items');
+
+    // Get dimensions
+    table.rows.load('count');
+    const firstRow = table.rows.getItemAt(0);
+    firstRow.load('cellCount');
     await context.sync();
 
-    // Load all row cells
-    for (const row of table.rows.items) {
-        row.cells.load('items');
-    }
-    await context.sync();
+    const rowCount = table.rows.count;
+    const colCount = firstRow.cellCount;
 
-    // Load all cell text in one batch
+    // Batch load all cell texts using getCell
     const cellRefs = [];
-    for (let r = 0; r < table.rows.items.length; r++) {
-        const row = table.rows.items[r];
-        for (let c = 0; c < row.cells.items.length; c++) {
-            const cell = row.cells.items[c];
-            cell.body.textRange.load('text');
-            cellRefs.push({ row: r, col: c, cell });
+    for (let r = 0; r < rowCount; r++) {
+        for (let c = 0; c < colCount; c++) {
+            try {
+                const cell = table.getCell(r, c);
+                cell.body.textRange.load('text');
+                cellRefs.push({ row: r, col: c, cell });
+            } catch (e) {
+                // Merged or inaccessible cell
+            }
         }
     }
     await context.sync();
 
-    // Collect cells with text
     for (const { row, col, cell } of cellRefs) {
-        const text = cell.body.textRange.text;
-        if (text && text.trim()) {
-            slideTexts.push({ shapeIndex, text, fontData: null, row, col });
+        try {
+            const text = cell.body.textRange.text;
+            if (text && text.trim()) {
+                slideTexts.push({ shapeIndex, text, fontData: null, row, col });
+            }
+        } catch (e) {
+            // Cell text couldn't be read
+        }
+    }
+}
+
+async function extractGroupShapes(shape, shapeIndex, context, slideTexts, canCaptureFormatting) {
+    const group = shape.group;
+    const childShapes = group.shapes;
+    childShapes.load('items');
+    await context.sync();
+
+    // Load types for children
+    for (const child of childShapes.items) {
+        try { child.load('type'); } catch (e) { /* ignore */ }
+    }
+    try { await context.sync(); } catch (e) { /* ignore */ }
+
+    for (let k = 0; k < childShapes.items.length; k++) {
+        const child = childShapes.items[k];
+        let childType = null;
+        try { childType = child.type; } catch (e) { /* ignore */ }
+
+        try {
+            if (childType === 'Table') {
+                // Table within a group — extract cells but tag with groupChildIndex
+                const childTable = child.table;
+                childTable.rows.load('count');
+                const childFirstRow = childTable.rows.getItemAt(0);
+                childFirstRow.load('cellCount');
+                await context.sync();
+
+                const rowCount = childTable.rows.count;
+                const colCount = childFirstRow.cellCount;
+                const cellRefs = [];
+                for (let r = 0; r < rowCount; r++) {
+                    for (let c = 0; c < colCount; c++) {
+                        try {
+                            const cell = childTable.getCell(r, c);
+                            cell.body.textRange.load('text');
+                            cellRefs.push({ row: r, col: c, cell });
+                        } catch (e) { /* merged cell */ }
+                    }
+                }
+                await context.sync();
+                for (const { row, col, cell } of cellRefs) {
+                    try {
+                        const text = cell.body.textRange.text;
+                        if (text && text.trim()) {
+                            slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData: null, row, col });
+                        }
+                    } catch (e) { /* skip */ }
+                }
+            } else {
+                // Text shape within a group
+                const textRange = child.textFrame.textRange;
+                textRange.load('text');
+                await context.sync();
+
+                const text = textRange.text;
+                if (text && text.trim()) {
+                    let fontData = null;
+                    if (canCaptureFormatting) {
+                        fontData = await captureFormatting(child.textFrame, context);
+                    }
+                    slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData });
+                }
+            }
+        } catch (e) {
+            continue;
         }
     }
 }
@@ -242,7 +352,6 @@ async function captureFormatting(textFrame, context) {
         textRange.font.load(fontProps);
         await context.sync();
 
-        // Check if formatting is uniform
         const wholeFont = {};
         let isUniform = true;
         for (const prop of fontProps) {
@@ -255,7 +364,6 @@ async function captureFormatting(textFrame, context) {
             return { type: 'uniform', font: wholeFont };
         }
 
-        // Mixed formatting — capture per paragraph
         const text = textRange.text;
         const paragraphs = text.split('\r');
         let offset = 0;
@@ -280,7 +388,7 @@ async function captureFormatting(textFrame, context) {
             } else {
                 paragraphFonts.push({});
             }
-            offset += para.length + 1; // +1 for \r
+            offset += para.length + 1;
         }
 
         return { type: 'perParagraph', fonts: paragraphFonts };
@@ -306,16 +414,15 @@ function classifyLocally(slideData) {
             // Table cells: classify entirely locally (no AI needed)
             if (t.row !== undefined) {
                 if (t.row === 0) {
-                    // First row = table header, keep as-is
                     classified.push({
                         slideIndex: slide.slideIndex,
                         shapeIndex: t.shapeIndex,
+                        groupChildIndex: t.groupChildIndex,
                         row: t.row,
                         col: t.col,
                         category: 'table_header'
                     });
                 } else {
-                    // Other rows: try local patterns, default to 'body'
                     let category = 'body';
                     for (const pattern of LOCAL_PATTERNS) {
                         if (pattern.test(text)) {
@@ -326,6 +433,7 @@ function classifyLocally(slideData) {
                     classified.push({
                         slideIndex: slide.slideIndex,
                         shapeIndex: t.shapeIndex,
+                        groupChildIndex: t.groupChildIndex,
                         row: t.row,
                         col: t.col,
                         category
@@ -341,6 +449,7 @@ function classifyLocally(slideData) {
                     classified.push({
                         slideIndex: slide.slideIndex,
                         shapeIndex: t.shapeIndex,
+                        groupChildIndex: t.groupChildIndex,
                         category: pattern.category
                     });
                     matched = true;
@@ -353,6 +462,7 @@ function classifyLocally(slideData) {
                 unclassified.push({
                     slideIndex: slide.slideIndex,
                     shapeIndex: t.shapeIndex,
+                    groupChildIndex: t.groupChildIndex,
                     text,
                     paragraphs: paragraphs.filter(p => p.trim())
                 });
@@ -367,9 +477,10 @@ function classifyLocally(slideData) {
 // AI CLASSIFICATION
 // ============================================
 
-async function classifyWithAI(shapes) {
-    const payload = shapes.map(s => {
-        const item = { slideIndex: s.slideIndex, shapeIndex: s.shapeIndex };
+async function classifyWithAI(items) {
+    // Send with sequential IDs — AI doesn't need to track slide/shape refs
+    const payload = items.map((s, idx) => {
+        const item = { id: idx };
         if (s.paragraphs && s.paragraphs.length > 1) {
             item.paragraphs = s.paragraphs;
         } else {
@@ -392,7 +503,22 @@ async function classifyWithAI(shapes) {
     }
 
     const result = await response.json();
-    return result.classifications || [];
+
+    // Map AI results back to full references
+    return (result.classifications || []).map(c => {
+        const original = items[c.id];
+        if (!original) return null;
+        const classification = {
+            slideIndex: original.slideIndex,
+            shapeIndex: original.shapeIndex,
+            category: c.category,
+        };
+        if (original.groupChildIndex !== undefined) {
+            classification.groupChildIndex = original.groupChildIndex;
+        }
+        if (c.label) classification.label = c.label;
+        return classification;
+    }).filter(Boolean);
 }
 
 // Fallback when AI is unavailable: classify all unclassified as 'body'
@@ -400,6 +526,7 @@ function fallbackClassify(unclassified) {
     return unclassified.map(s => ({
         slideIndex: s.slideIndex,
         shapeIndex: s.shapeIndex,
+        groupChildIndex: s.groupChildIndex,
         category: 'body'
     }));
 }
@@ -411,14 +538,14 @@ function fallbackClassify(unclassified) {
 function buildRewrites(slideData, classifications) {
     const classMap = new Map();
     for (const c of classifications) {
-        classMap.set(makeKey(c.slideIndex, c.shapeIndex, c.row, c.col), c);
+        classMap.set(makeKey(c.slideIndex, c.shapeIndex, c.row, c.col, c.groupChildIndex), c);
     }
 
     const rewrites = [];
 
     for (const slide of slideData) {
         for (const t of slide.texts) {
-            const key = makeKey(slide.slideIndex, t.shapeIndex, t.row, t.col);
+            const key = makeKey(slide.slideIndex, t.shapeIndex, t.row, t.col, t.groupChildIndex);
             const classification = classMap.get(key);
 
             if (!classification) continue;
@@ -431,16 +558,18 @@ function buildRewrites(slideData, classifications) {
             }
 
             const text = t.text;
+            const isTableCell = t.row !== undefined;
             let rewrittenText;
 
-            if (category === 'body') {
-                // Replace each paragraph with [Beskrivning], preserve empty lines
+            if (isTableCell) {
+                // Short placeholder for ALL table cell replacements to avoid overflow
+                rewrittenText = '[...]';
+            } else if (category === 'body') {
                 const paragraphs = text.split('\r');
                 rewrittenText = paragraphs.map(p =>
                     p.trim() ? PLACEHOLDER_MAP.body : ''
                 ).join('\r');
             } else if (category === 'label_value') {
-                // Preserve the label part, replace the value
                 if (label) {
                     const labelPattern = new RegExp(`^(${escapeRegex(label)}\\s*[:;]\\s*)`, 'i');
                     const match = text.match(labelPattern);
@@ -464,6 +593,7 @@ function buildRewrites(slideData, classifications) {
                     shapeIndex: t.shapeIndex,
                     row: t.row,
                     col: t.col,
+                    groupChildIndex: t.groupChildIndex,
                     rewrittenText
                 });
             }
@@ -486,13 +616,13 @@ async function replaceAllShapes(slideData, rewrites) {
 
     const rewriteMap = new Map();
     for (const r of rewrites) {
-        rewriteMap.set(makeKey(r.slideIndex, r.shapeIndex, r.row, r.col), r.rewrittenText);
+        rewriteMap.set(makeKey(r.slideIndex, r.shapeIndex, r.row, r.col, r.groupChildIndex), r.rewrittenText);
     }
 
     const fontMap = new Map();
     for (const slide of slideData) {
         for (const t of slide.texts) {
-            fontMap.set(makeKey(slide.slideIndex, t.shapeIndex, t.row, t.col), t.fontData);
+            fontMap.set(makeKey(slide.slideIndex, t.shapeIndex, t.row, t.col, t.groupChildIndex), t.fontData);
         }
     }
 
@@ -508,7 +638,7 @@ async function replaceAllShapes(slideData, rewrites) {
             await context.sync();
 
             for (const t of slide.texts) {
-                const key = makeKey(slide.slideIndex, t.shapeIndex, t.row, t.col);
+                const key = makeKey(slide.slideIndex, t.shapeIndex, t.row, t.col, t.groupChildIndex);
                 const newText = rewriteMap.get(key);
                 if (!newText || newText === t.text) continue;
 
@@ -517,10 +647,26 @@ async function replaceAllShapes(slideData, rewrites) {
                     const fontData = fontMap.get(key);
 
                     let textFrame;
-                    if (t.row !== undefined) {
+                    if (t.row !== undefined && t.groupChildIndex !== undefined) {
+                        // Table cell within a group
+                        const group = shape.group;
+                        const childShapes = group.shapes;
+                        childShapes.load('items');
+                        await context.sync();
+                        const child = childShapes.items[t.groupChildIndex];
+                        const cell = child.table.getCell(t.row, t.col);
+                        textFrame = cell.body;
+                    } else if (t.row !== undefined) {
                         // Table cell
                         const cell = shape.table.getCell(t.row, t.col);
                         textFrame = cell.body;
+                    } else if (t.groupChildIndex !== undefined) {
+                        // Text shape within a group
+                        const group = shape.group;
+                        const childShapes = group.shapes;
+                        childShapes.load('items');
+                        await context.sync();
+                        textFrame = childShapes.items[t.groupChildIndex].textFrame;
                     } else {
                         textFrame = shape.textFrame;
                     }

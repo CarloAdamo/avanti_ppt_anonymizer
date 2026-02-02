@@ -7,15 +7,13 @@ const corsHeaders = {
 };
 
 interface ShapeItem {
-  slideIndex: number;
-  shapeIndex: number;
+  id: number;
   text?: string;
   paragraphs?: string[];
 }
 
 interface Classification {
-  slideIndex: number;
-  shapeIndex: number;
+  id: number;
   category: string;
   label?: string;
 }
@@ -46,7 +44,7 @@ Deno.serve(async (req: Request) => {
       const content = s.paragraphs
         ? `"paragraphs": ${JSON.stringify(s.paragraphs)}`
         : `"text": ${JSON.stringify(s.text)}`;
-      return `{ "slideIndex": ${s.slideIndex}, "shapeIndex": ${s.shapeIndex}, ${content} }`;
+      return `{ "id": ${s.id}, ${content} }`;
     }).join(",\n");
 
     const systemPrompt = `Du klassificerar text från PowerPoint-shapes i konsultpresentationer.
@@ -62,8 +60,8 @@ Kategorier:
 
 VIKTIGT: Använd keep SPARSAMT. De flesta shapes innehåller specifikt innehåll och ska klassificeras som title, body, eller name. Specifika KPI:er, aktiviteter, beskrivningar och affärsmål = body.
 
-Svara med JSON: { "classifications": [{ "slideIndex": 0, "shapeIndex": 0, "category": "title" }] }
-För label_value, inkludera "label"-fält: { "slideIndex": 0, "shapeIndex": 5, "category": "label_value", "label": "Driver" }
+Svara med JSON: { "classifications": [{ "id": 0, "category": "title" }] }
+För label_value, inkludera "label"-fält: { "id": 5, "category": "label_value", "label": "Driver" }
 
 Klassificera BARA, generera INGEN ny text.`;
 
@@ -105,8 +103,7 @@ Klassificera BARA, generera INGEN ny text.`;
     const parsed = JSON.parse(content);
     const classifications: Classification[] = (parsed.classifications || []).map((c: Classification) => {
       const item: Classification = {
-        slideIndex: c.slideIndex,
-        shapeIndex: c.shapeIndex,
+        id: c.id,
         category: c.category,
       };
       if (c.label) item.label = c.label;
