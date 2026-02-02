@@ -63,6 +63,15 @@ const LOCAL_PATTERNS = [
     }
 ];
 
+// ============================================
+// KEY HELPER
+// ============================================
+
+function makeKey(slideIndex, shapeIndex, row, col) {
+    if (row !== undefined) return `${slideIndex}-${shapeIndex}-${row}-${col}`;
+    return `${slideIndex}-${shapeIndex}`;
+}
+
 // Initialize Office
 Office.onReady((info) => {
     if (info.host === Office.HostType.PowerPoint) {
@@ -142,6 +151,8 @@ async function extractAllText() {
         slideCollection.load('items');
         await context.sync();
 
+        const canCaptureFormatting = Office.context.requirements.isSetSupported('PowerPointApi', '1.4');
+
         for (let i = 0; i < slideCollection.items.length; i++) {
             const slide = slideCollection.items[i];
             const shapes = slide.shapes;
@@ -151,8 +162,10 @@ async function extractAllText() {
             const slideTexts = [];
 
             for (let j = 0; j < shapes.items.length; j++) {
+                const shape = shapes.items[j];
+
+                // Try as text shape first
                 try {
-                    const shape = shapes.items[j];
                     const textRange = shape.textFrame.textRange;
                     textRange.load('text');
                     await context.sync();
@@ -160,13 +173,19 @@ async function extractAllText() {
                     const text = textRange.text;
                     if (text && text.trim()) {
                         let fontData = null;
-                        if (Office.context.requirements.isSetSupported('PowerPointApi', '1.4')) {
-                            fontData = await captureFormatting(shape, context);
+                        if (canCaptureFormatting) {
+                            fontData = await captureFormatting(shape.textFrame, context);
                         }
                         slideTexts.push({ shapeIndex: j, text, fontData });
                     }
                 } catch (e) {
-                    continue;
+                    // Not a text shape — try as table
+                    try {
+                        await extractTableCells(shape, j, context, slideTexts);
+                    } catch (e2) {
+                        // Neither text nor table, skip
+                        continue;
+                    }
                 }
             }
 
@@ -179,19 +198,51 @@ async function extractAllText() {
     return slides;
 }
 
+async function extractTableCells(shape, shapeIndex, context, slideTexts) {
+    const table = shape.table;
+    table.rows.load('items');
+    await context.sync();
+
+    // Load all row cells
+    for (const row of table.rows.items) {
+        row.cells.load('items');
+    }
+    await context.sync();
+
+    // Load all cell text in one batch
+    const cellRefs = [];
+    for (let r = 0; r < table.rows.items.length; r++) {
+        const row = table.rows.items[r];
+        for (let c = 0; c < row.cells.items.length; c++) {
+            const cell = row.cells.items[c];
+            cell.body.textRange.load('text');
+            cellRefs.push({ row: r, col: c, cell });
+        }
+    }
+    await context.sync();
+
+    // Collect cells with text
+    for (const { row, col, cell } of cellRefs) {
+        const text = cell.body.textRange.text;
+        if (text && text.trim()) {
+            slideTexts.push({ shapeIndex, text, fontData: null, row, col });
+        }
+    }
+}
+
 // ============================================
 // FORMAT CAPTURE
 // ============================================
 
-async function captureFormatting(shape, context) {
+async function captureFormatting(textFrame, context) {
     const fontProps = ['bold', 'italic', 'color', 'size', 'name', 'underline'];
 
     try {
-        const textRange = shape.textFrame.textRange;
+        const textRange = textFrame.textRange;
         textRange.font.load(fontProps);
         await context.sync();
 
-        // Check if formatting is uniform across the whole shape
+        // Check if formatting is uniform
         const wholeFont = {};
         let isUniform = true;
         for (const prop of fontProps) {
@@ -251,8 +302,40 @@ function classifyLocally(slideData) {
     for (const slide of slideData) {
         for (const t of slide.texts) {
             const text = t.text;
-            let matched = false;
 
+            // Table cells: classify entirely locally (no AI needed)
+            if (t.row !== undefined) {
+                if (t.row === 0) {
+                    // First row = table header, keep as-is
+                    classified.push({
+                        slideIndex: slide.slideIndex,
+                        shapeIndex: t.shapeIndex,
+                        row: t.row,
+                        col: t.col,
+                        category: 'table_header'
+                    });
+                } else {
+                    // Other rows: try local patterns, default to 'body'
+                    let category = 'body';
+                    for (const pattern of LOCAL_PATTERNS) {
+                        if (pattern.test(text)) {
+                            category = pattern.category;
+                            break;
+                        }
+                    }
+                    classified.push({
+                        slideIndex: slide.slideIndex,
+                        shapeIndex: t.shapeIndex,
+                        row: t.row,
+                        col: t.col,
+                        category
+                    });
+                }
+                continue;
+            }
+
+            // Regular shapes: try local patterns
+            let matched = false;
             for (const pattern of LOCAL_PATTERNS) {
                 if (pattern.test(text)) {
                     classified.push({
@@ -266,29 +349,13 @@ function classifyLocally(slideData) {
             }
 
             if (!matched) {
-                // Check individual paragraphs for mixed content
                 const paragraphs = text.split('\r');
-                const hasLocalMatch = paragraphs.some(p =>
-                    p.trim() && LOCAL_PATTERNS.some(pat => pat.test(p))
-                );
-
-                if (hasLocalMatch) {
-                    // Shape has some locally-classifiable paragraphs but also other content
-                    // Send to AI for proper whole-shape classification
-                    unclassified.push({
-                        slideIndex: slide.slideIndex,
-                        shapeIndex: t.shapeIndex,
-                        text: text,
-                        paragraphs: paragraphs.filter(p => p.trim())
-                    });
-                } else {
-                    unclassified.push({
-                        slideIndex: slide.slideIndex,
-                        shapeIndex: t.shapeIndex,
-                        text: text,
-                        paragraphs: paragraphs.filter(p => p.trim())
-                    });
-                }
+                unclassified.push({
+                    slideIndex: slide.slideIndex,
+                    shapeIndex: t.shapeIndex,
+                    text,
+                    paragraphs: paragraphs.filter(p => p.trim())
+                });
             }
         }
     }
@@ -344,14 +411,14 @@ function fallbackClassify(unclassified) {
 function buildRewrites(slideData, classifications) {
     const classMap = new Map();
     for (const c of classifications) {
-        classMap.set(`${c.slideIndex}-${c.shapeIndex}`, c);
+        classMap.set(makeKey(c.slideIndex, c.shapeIndex, c.row, c.col), c);
     }
 
     const rewrites = [];
 
     for (const slide of slideData) {
         for (const t of slide.texts) {
-            const key = `${slide.slideIndex}-${t.shapeIndex}`;
+            const key = makeKey(slide.slideIndex, t.shapeIndex, t.row, t.col);
             const classification = classMap.get(key);
 
             if (!classification) continue;
@@ -375,7 +442,6 @@ function buildRewrites(slideData, classifications) {
             } else if (category === 'label_value') {
                 // Preserve the label part, replace the value
                 if (label) {
-                    // Try to find the label in the text and keep it
                     const labelPattern = new RegExp(`^(${escapeRegex(label)}\\s*[:;]\\s*)`, 'i');
                     const match = text.match(labelPattern);
                     if (match) {
@@ -396,6 +462,8 @@ function buildRewrites(slideData, classifications) {
                 rewrites.push({
                     slideIndex: slide.slideIndex,
                     shapeIndex: t.shapeIndex,
+                    row: t.row,
+                    col: t.col,
                     rewrittenText
                 });
             }
@@ -418,13 +486,13 @@ async function replaceAllShapes(slideData, rewrites) {
 
     const rewriteMap = new Map();
     for (const r of rewrites) {
-        rewriteMap.set(`${r.slideIndex}-${r.shapeIndex}`, r.rewrittenText);
+        rewriteMap.set(makeKey(r.slideIndex, r.shapeIndex, r.row, r.col), r.rewrittenText);
     }
 
     const fontMap = new Map();
     for (const slide of slideData) {
         for (const t of slide.texts) {
-            fontMap.set(`${slide.slideIndex}-${t.shapeIndex}`, t.fontData);
+            fontMap.set(makeKey(slide.slideIndex, t.shapeIndex, t.row, t.col), t.fontData);
         }
     }
 
@@ -440,14 +508,24 @@ async function replaceAllShapes(slideData, rewrites) {
             await context.sync();
 
             for (const t of slide.texts) {
-                const key = `${slide.slideIndex}-${t.shapeIndex}`;
+                const key = makeKey(slide.slideIndex, t.shapeIndex, t.row, t.col);
                 const newText = rewriteMap.get(key);
                 if (!newText || newText === t.text) continue;
 
                 try {
                     const shape = shapes.items[t.shapeIndex];
                     const fontData = fontMap.get(key);
-                    await replaceWithFormatting(shape, context, newText, fontData);
+
+                    let textFrame;
+                    if (t.row !== undefined) {
+                        // Table cell
+                        const cell = shape.table.getCell(t.row, t.col);
+                        textFrame = cell.body;
+                    } else {
+                        textFrame = shape.textFrame;
+                    }
+
+                    await replaceWithFormatting(textFrame, context, newText, fontData);
                     count++;
                 } catch (e) {
                     console.warn('Could not replace shape:', e);
@@ -459,8 +537,8 @@ async function replaceAllShapes(slideData, rewrites) {
     return count;
 }
 
-async function replaceWithFormatting(shape, context, newText, fontData) {
-    const textRange = shape.textFrame.textRange;
+async function replaceWithFormatting(textFrame, context, newText, fontData) {
+    const textRange = textFrame.textRange;
     textRange.text = newText;
     await context.sync();
 

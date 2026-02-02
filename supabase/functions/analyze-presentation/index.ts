@@ -50,14 +50,17 @@ Deno.serve(async (req: Request) => {
     }).join(",\n");
 
     const systemPrompt = `Du klassificerar text från PowerPoint-shapes i konsultpresentationer.
+Syftet är att GENERALISERA presentationen — allt specifikt affärsinnehåll ska ersättas med platshållare.
 
 Kategorier:
 - title: Huvudrubrik på en slide
-- body: Beskrivande text, punktlistor, aktiviteter
+- body: Beskrivande text, punktlistor, aktiviteter, KPI:er, affärsmål, strategier
 - name: Personnamn eller rollreferenser
 - label_value: "Etikett: Värde"-mönster (ange label-delen i "label"-fältet)
-- table_header: Kolumn-/radrubrik
-- keep: Redan generisk text som inte behöver ändras (t.ex. "Syfte", "Mål", "Agenda")
+- table_header: Strukturella kolumn-/radrubrik (t.ex. "Aktivitet", "Status", "Ansvarig")
+- keep: ENBART helt generiska enstaka ord som "Syfte", "Mål", "Agenda"
+
+VIKTIGT: Använd keep SPARSAMT. De flesta shapes innehåller specifikt innehåll och ska klassificeras som title, body, eller name. Specifika KPI:er, aktiviteter, beskrivningar och affärsmål = body.
 
 Svara med JSON: { "classifications": [{ "slideIndex": 0, "shapeIndex": 0, "category": "title" }] }
 För label_value, inkludera "label"-fält: { "slideIndex": 0, "shapeIndex": 5, "category": "label_value", "label": "Driver" }
