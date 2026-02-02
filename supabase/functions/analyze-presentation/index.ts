@@ -16,6 +16,8 @@ interface Classification {
   id: number;
   category: string;
   label?: string;
+  rewrite?: string;
+  paragraphRewrites?: string[];
 }
 
 Deno.serve(async (req: Request) => {
@@ -44,11 +46,12 @@ Deno.serve(async (req: Request) => {
       const content = s.paragraphs
         ? `"paragraphs": ${JSON.stringify(s.paragraphs)}`
         : `"text": ${JSON.stringify(s.text)}`;
-      return `{ "id": ${s.id}, ${content} }`;
+      const tablePart = (s as any).isTableCell ? `, "isTableCell": true` : '';
+      return `{ "id": ${s.id}, ${content}${tablePart} }`;
     }).join(",\n");
 
-    const systemPrompt = `Du klassificerar text från PowerPoint-shapes i konsultpresentationer.
-Syftet är att GENERALISERA presentationen — allt specifikt affärsinnehåll ska ersättas med platshållare.
+    const systemPrompt = `Du klassificerar text från PowerPoint-shapes i konsultpresentationer och genererar beskrivande mall-texter.
+Syftet är att GENERALISERA presentationen — allt specifikt innehåll ersätts med en kort beskrivning av vad texten handlar om. Resultatet ska vara sökbart och återanvändbart som mall.
 
 Kategorier:
 - title: Huvudrubrik på en slide
@@ -58,12 +61,38 @@ Kategorier:
 - table_header: Strukturella kolumn-/radrubrik (t.ex. "Aktivitet", "Status", "Ansvarig")
 - keep: ENBART helt generiska enstaka ord som "Syfte", "Mål", "Agenda"
 
-VIKTIGT: Använd keep SPARSAMT. De flesta shapes innehåller specifikt innehåll och ska klassificeras som title, body, eller name. Specifika KPI:er, aktiviteter, beskrivningar och affärsmål = body.
+VIKTIGT: Använd keep SPARSAMT. De flesta shapes innehåller specifikt innehåll.
 
-Svara med JSON: { "classifications": [{ "id": 0, "category": "title" }] }
-För label_value, inkludera "label"-fält: { "id": 5, "category": "label_value", "label": "Driver" }
+## Rewrite-regler
 
-Klassificera BARA, generera INGEN ny text.`;
+För varje shape (utom keep och table_header), generera ett "rewrite"-fält med en BESKRIVANDE MALL-TEXT:
+
+- **title**: "Rubrik om [ämne och syfte i 5-10 ord]"
+- **body** (kort text, 1 mening): "Mening om [ämne]"
+- **body** (längre text): "Stycke om [ämne, poäng och syfte i 10-20 ord]"
+- **name**: En generisk rolltitel, t.ex. "[Projektledare]", "[Konsult]", "[Avdelningschef]"
+- **label_value**: Beskriv bara värde-delen: t.ex. "beskrivning av metriken" eller "namn på ansvarig person"
+- **Tabellceller** (har isTableCell: true): Kort beskrivning av cellens innehåll i 2-5 ord
+
+Skriv beskrivningen på SAMMA SPRÅK som originaltexten.
+Fånga ämne och syfte men ta bort alla specifika namn, siffror, och detaljer.
+
+## Flerraderstext (paragraphs)
+
+Om en shape har "paragraphs" (array av stycken), generera "paragraphRewrites" — en array med en beskrivning per stycke.
+- Tomma stycken i originalet → tom sträng i paragraphRewrites
+- Varje icke-tomt stycke → beskrivande mall-text
+
+## JSON-format
+
+{ "classifications": [
+  { "id": 0, "category": "title", "rewrite": "Rubrik om centralisering av kärnkompetenser för att balansera snabbhet och styrning" },
+  { "id": 1, "category": "body", "paragraphRewrites": ["Stycke om hur teknik vuxit organiskt och skapat siloeffekter", "", "Mening om varför centralisering av plattformar nu behövs"] },
+  { "id": 2, "category": "name", "rewrite": "[Projektledare]" },
+  { "id": 3, "category": "label_value", "label": "Driver", "rewrite": "namn på ansvarig person" },
+  { "id": 4, "category": "keep" },
+  { "id": 5, "category": "table_header" }
+] }`;
 
     const userPrompt = `Klassificera följande shapes:
 
@@ -107,6 +136,8 @@ Klassificera BARA, generera INGEN ny text.`;
         category: c.category,
       };
       if (c.label) item.label = c.label;
+      if (c.rewrite) item.rewrite = c.rewrite;
+      if (c.paragraphRewrites) item.paragraphRewrites = c.paragraphRewrites;
       return item;
     });
 

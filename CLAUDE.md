@@ -129,8 +129,14 @@ await context.sync();
 /
 ├── manifest.xml          # Office Add-in manifest
 ├── taskpane.html         # UI för anonymisering
-├── taskpane.js           # Huvudlogik
 ├── taskpane.css          # Styles
+├── js/                   # ES-moduler (type="module")
+│   ├── main.js           # Entry point: Office.onReady, huvudflöde
+│   ├── config.js         # Konstanter, patterns, hjälpfunktioner
+│   ├── extraction.js     # Text-extraktion från shapes/tabeller/grupper
+│   ├── classification.js # Lokal + AI-klassificering, buildRewrites
+│   ├── replacement.js    # Text-ersättning med formatbevarande
+│   └── ui.js             # UI-hjälpfunktioner (loading, status, done)
 ├── assets/               # Ikoner
 │   ├── icon-16.png
 │   ├── icon-32.png

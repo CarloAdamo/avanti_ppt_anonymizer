@@ -17,7 +17,7 @@ export function classifyLocally(slideData) {
         for (const t of slide.texts) {
             const text = t.text;
 
-            // Table cells: classify entirely locally (no AI needed)
+            // Table cells: row 0 = header (keep), others try local PII patterns first
             if (t.row !== undefined) {
                 if (t.row === 0) {
                     classified.push({
@@ -29,21 +29,33 @@ export function classifyLocally(slideData) {
                         category: 'table_header'
                     });
                 } else {
-                    let category = 'body';
+                    let localMatch = false;
                     for (const pattern of LOCAL_PATTERNS) {
                         if (pattern.test(text)) {
-                            category = pattern.category;
+                            classified.push({
+                                slideIndex: slide.slideIndex,
+                                shapeIndex: t.shapeIndex,
+                                groupChildIndex: t.groupChildIndex,
+                                row: t.row,
+                                col: t.col,
+                                category: pattern.category
+                            });
+                            localMatch = true;
                             break;
                         }
                     }
-                    classified.push({
-                        slideIndex: slide.slideIndex,
-                        shapeIndex: t.shapeIndex,
-                        groupChildIndex: t.groupChildIndex,
-                        row: t.row,
-                        col: t.col,
-                        category
-                    });
+                    if (!localMatch) {
+                        // Send to AI for descriptive rewrite
+                        unclassified.push({
+                            slideIndex: slide.slideIndex,
+                            shapeIndex: t.shapeIndex,
+                            groupChildIndex: t.groupChildIndex,
+                            row: t.row,
+                            col: t.col,
+                            text,
+                            isTableCell: true
+                        });
+                    }
                 }
                 continue;
             }
@@ -88,6 +100,7 @@ export async function classifyWithAI(items) {
         } else {
             item.text = s.text;
         }
+        if (s.isTableCell) item.isTableCell = true;
         return item;
     });
 
@@ -118,19 +131,32 @@ export async function classifyWithAI(items) {
         if (original.groupChildIndex !== undefined) {
             classification.groupChildIndex = original.groupChildIndex;
         }
+        if (original.row !== undefined) {
+            classification.row = original.row;
+            classification.col = original.col;
+        }
         if (c.label) classification.label = c.label;
+        if (c.rewrite) classification.rewrite = c.rewrite;
+        if (c.paragraphRewrites) classification.paragraphRewrites = c.paragraphRewrites;
         return classification;
     }).filter(Boolean);
 }
 
 // Fallback when AI is unavailable: classify all unclassified as 'body'
 export function fallbackClassify(unclassified) {
-    return unclassified.map(s => ({
-        slideIndex: s.slideIndex,
-        shapeIndex: s.shapeIndex,
-        groupChildIndex: s.groupChildIndex,
-        category: 'body'
-    }));
+    return unclassified.map(s => {
+        const item = {
+            slideIndex: s.slideIndex,
+            shapeIndex: s.shapeIndex,
+            groupChildIndex: s.groupChildIndex,
+            category: 'body'
+        };
+        if (s.row !== undefined) {
+            item.row = s.row;
+            item.col = s.col;
+        }
+        return item;
+    });
 }
 
 export function buildRewrites(slideData, classifications) {
@@ -156,18 +182,35 @@ export function buildRewrites(slideData, classifications) {
             }
 
             const text = t.text;
-            const isTableCell = t.row !== undefined;
             let rewrittenText;
 
-            if (isTableCell) {
-                // Short placeholder for ALL table cell replacements to avoid overflow
-                rewrittenText = '[...]';
-            } else if (category === 'body') {
-                const paragraphs = text.split('\r');
-                rewrittenText = paragraphs.map(p =>
-                    p.trim() ? PLACEHOLDER_MAP.body : ''
-                ).join('\r');
-            } else if (category === 'label_value') {
+            // Priority 1: AI-generated paragraphRewrites (multi-paragraph text)
+            if (classification.paragraphRewrites) {
+                const originalParagraphs = text.split('\r');
+                const aiRewrites = classification.paragraphRewrites;
+                // Match structure: preserve empty lines from original
+                rewrittenText = originalParagraphs.map((p, i) => {
+                    if (!p.trim()) return '';
+                    return aiRewrites[i] || '';
+                }).join('\r');
+            }
+            // Priority 2: AI-generated single rewrite
+            else if (classification.rewrite) {
+                if (category === 'label_value' && label) {
+                    // Preserve the label prefix, use AI rewrite for the value part
+                    const labelPattern = new RegExp(`^(${escapeRegex(label)}\\s*[:;]\\s*)`, 'i');
+                    const match = text.match(labelPattern);
+                    if (match) {
+                        rewrittenText = match[1] + classification.rewrite;
+                    } else {
+                        rewrittenText = label + ': ' + classification.rewrite;
+                    }
+                } else {
+                    rewrittenText = classification.rewrite;
+                }
+            }
+            // Priority 3: Fallback to PLACEHOLDER_MAP (locally classified PII etc.)
+            else if (category === 'label_value') {
                 if (label) {
                     const labelPattern = new RegExp(`^(${escapeRegex(label)}\\s*[:;]\\s*)`, 'i');
                     const match = text.match(labelPattern);
@@ -179,6 +222,11 @@ export function buildRewrites(slideData, classifications) {
                 } else {
                     rewrittenText = PLACEHOLDER_MAP.body;
                 }
+            } else if (category === 'body') {
+                const paragraphs = text.split('\r');
+                rewrittenText = paragraphs.map(p =>
+                    p.trim() ? PLACEHOLDER_MAP.body : ''
+                ).join('\r');
             } else if (PLACEHOLDER_MAP[category]) {
                 rewrittenText = PLACEHOLDER_MAP[category];
             } else {
