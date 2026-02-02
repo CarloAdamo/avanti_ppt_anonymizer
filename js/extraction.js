@@ -71,59 +71,57 @@ async function extractTextShape(shape, shapeIndex, context, slideTexts, canCaptu
 }
 
 async function extractTableCells(shape, shapeIndex, context, slideTexts) {
-    let table;
     try {
-        table = shape.table;
+        const table = shape.table;
+
+        // Get dimensions — this sync is where InvalidArgument throws
+        // if the table proxy isn't actually usable
+        table.rows.load('count');
+        const firstRow = table.rows.getItemAt(0);
+        firstRow.load('cellCount');
+        await context.sync();
+
+        const rowCount = table.rows.count;
+        const colCount = firstRow.cellCount;
+
+        // Per-row sync: each row is independent so one bad row doesn't kill the rest
+        for (let r = 0; r < rowCount; r++) {
+            try {
+                const rowCells = [];
+                for (let c = 0; c < colCount; c++) {
+                    try {
+                        const cell = table.getCell(r, c);
+                        cell.body.textRange.load('text');
+                        rowCells.push({ row: r, col: c, cell });
+                    } catch (e) {
+                        // Merged or inaccessible cell
+                    }
+                }
+                await context.sync();
+                for (const { row, col, cell } of rowCells) {
+                    try {
+                        const text = cell.body.textRange.text;
+                        if (text && text.trim()) {
+                            slideTexts.push({ shapeIndex, text, fontData: null, row, col });
+                        }
+                    } catch (e) {
+                        // Cell text couldn't be read
+                    }
+                }
+            } catch (e) {
+                console.warn(`Table row ${r} extraction failed:`, e.message);
+            }
+        }
     } catch (e) {
-        // Navigation property access failed
-    }
-    if (!table) {
-        // Table property unavailable — fall back to textFrame
+        // Table API unavailable (proxy returned but sync throws InvalidArgument)
+        // Fall back to textFrame which gives concatenated table text
+        console.log(`Table cell API failed for shape ${shapeIndex}, using textFrame fallback:`, e.message);
         const textRange = shape.textFrame.textRange;
         textRange.load('text');
         await context.sync();
         const text = textRange.text;
         if (text && text.trim()) {
             slideTexts.push({ shapeIndex, text, fontData: null });
-        }
-        return;
-    }
-
-    // Get dimensions
-    table.rows.load('count');
-    const firstRow = table.rows.getItemAt(0);
-    firstRow.load('cellCount');
-    await context.sync();
-
-    const rowCount = table.rows.count;
-    const colCount = firstRow.cellCount;
-
-    // Per-row sync: each row is independent so one bad row doesn't kill the rest
-    for (let r = 0; r < rowCount; r++) {
-        try {
-            const rowCells = [];
-            for (let c = 0; c < colCount; c++) {
-                try {
-                    const cell = table.getCell(r, c);
-                    cell.body.textRange.load('text');
-                    rowCells.push({ row: r, col: c, cell });
-                } catch (e) {
-                    // Merged or inaccessible cell
-                }
-            }
-            await context.sync();
-            for (const { row, col, cell } of rowCells) {
-                try {
-                    const text = cell.body.textRange.text;
-                    if (text && text.trim()) {
-                        slideTexts.push({ shapeIndex, text, fontData: null, row, col });
-                    }
-                } catch (e) {
-                    // Cell text couldn't be read
-                }
-            }
-        } catch (e) {
-            console.warn(`Table row ${r} extraction failed:`, e.message);
         }
     }
 }
@@ -148,53 +146,49 @@ async function extractGroupShapes(shape, shapeIndex, context, slideTexts, canCap
         try {
             if (childType === 'Table') {
                 // Table within a group — extract cells but tag with groupChildIndex
-                let childTable;
                 try {
-                    childTable = child.table;
+                    const childTable = child.table;
+                    childTable.rows.load('count');
+                    const childFirstRow = childTable.rows.getItemAt(0);
+                    childFirstRow.load('cellCount');
+                    await context.sync();
+
+                    const rowCount = childTable.rows.count;
+                    const colCount = childFirstRow.cellCount;
+
+                    // Per-row sync: each row is independent
+                    for (let r = 0; r < rowCount; r++) {
+                        try {
+                            const rowCells = [];
+                            for (let c = 0; c < colCount; c++) {
+                                try {
+                                    const cell = childTable.getCell(r, c);
+                                    cell.body.textRange.load('text');
+                                    rowCells.push({ row: r, col: c, cell });
+                                } catch (e) { /* merged cell */ }
+                            }
+                            await context.sync();
+                            for (const { row, col, cell } of rowCells) {
+                                try {
+                                    const text = cell.body.textRange.text;
+                                    if (text && text.trim()) {
+                                        slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData: null, row, col });
+                                    }
+                                } catch (e) { /* skip */ }
+                            }
+                        } catch (e) {
+                            console.warn(`Group table row ${r} extraction failed:`, e.message);
+                        }
+                    }
                 } catch (e) {
-                    // Navigation property access failed
-                }
-                if (!childTable) {
-                    // Table property unavailable — fall back to textFrame
+                    // Table API unavailable — fall back to textFrame
+                    console.log(`Group table API failed for child ${k}, using textFrame fallback:`, e.message);
                     const textRange = child.textFrame.textRange;
                     textRange.load('text');
                     await context.sync();
                     const text = textRange.text;
                     if (text && text.trim()) {
                         slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData: null });
-                    }
-                    continue;
-                }
-                childTable.rows.load('count');
-                const childFirstRow = childTable.rows.getItemAt(0);
-                childFirstRow.load('cellCount');
-                await context.sync();
-
-                const rowCount = childTable.rows.count;
-                const colCount = childFirstRow.cellCount;
-
-                // Per-row sync: each row is independent
-                for (let r = 0; r < rowCount; r++) {
-                    try {
-                        const rowCells = [];
-                        for (let c = 0; c < colCount; c++) {
-                            try {
-                                const cell = childTable.getCell(r, c);
-                                cell.body.textRange.load('text');
-                                rowCells.push({ row: r, col: c, cell });
-                            } catch (e) { /* merged cell */ }
-                        }
-                        await context.sync();
-                        for (const { row, col, cell } of rowCells) {
-                            try {
-                                const text = cell.body.textRange.text;
-                                if (text && text.trim()) {
-                                    slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData: null, row, col });
-                                }
-                            } catch (e) { /* skip */ }
-                        }
-                    } catch (e) {
-                        console.warn(`Group table row ${r} extraction failed:`, e.message);
                     }
                 }
             } else {
