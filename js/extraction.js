@@ -71,7 +71,22 @@ async function extractTextShape(shape, shapeIndex, context, slideTexts, canCaptu
 }
 
 async function extractTableCells(shape, shapeIndex, context, slideTexts) {
+    // Explicitly load the table navigation property (required in PowerPoint Web)
+    shape.load('table');
+    await context.sync();
+
     const table = shape.table;
+    if (!table) {
+        // Table property unavailable — fall back to textFrame
+        const textRange = shape.textFrame.textRange;
+        textRange.load('text');
+        await context.sync();
+        const text = textRange.text;
+        if (text && text.trim()) {
+            slideTexts.push({ shapeIndex, text, fontData: null });
+        }
+        return;
+    }
 
     // Get dimensions
     table.rows.load('count');
@@ -132,7 +147,20 @@ async function extractGroupShapes(shape, shapeIndex, context, slideTexts, canCap
         try {
             if (childType === 'Table') {
                 // Table within a group — extract cells but tag with groupChildIndex
+                child.load('table');
+                await context.sync();
                 const childTable = child.table;
+                if (!childTable) {
+                    // Table property unavailable — fall back to textFrame
+                    const textRange = child.textFrame.textRange;
+                    textRange.load('text');
+                    await context.sync();
+                    const text = textRange.text;
+                    if (text && text.trim()) {
+                        slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData: null });
+                    }
+                    continue;
+                }
                 childTable.rows.load('count');
                 const childFirstRow = childTable.rows.getItemAt(0);
                 childFirstRow.load('cellCount');
