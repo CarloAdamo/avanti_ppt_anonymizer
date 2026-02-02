@@ -1,5 +1,126 @@
 // Avanti PPT Anonymizer — Text extraction from shapes/tables/groups
 
+// ---- PPTX binary retrieval & table parsing (fallback for Table API) ----
+
+const A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+const P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main';
+const R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+
+function getPptxFile() {
+    return new Promise((resolve, reject) => {
+        Office.context.document.getFileAsync(
+            Office.FileType.Compressed,
+            { sliceSize: 65536 },
+            async (result) => {
+                if (result.status !== Office.AsyncResultStatus.Succeeded) {
+                    reject(new Error(result.error.message));
+                    return;
+                }
+                try {
+                    const file = result.value;
+                    const slices = [];
+                    for (let i = 0; i < file.sliceCount; i++) {
+                        slices.push(await new Promise((res, rej) => {
+                            file.getSliceAsync(i, (r) =>
+                                r.status === Office.AsyncResultStatus.Succeeded
+                                    ? res(r.value.data)
+                                    : rej(new Error(r.error.message))
+                            );
+                        }));
+                    }
+                    file.closeAsync();
+                    let size = 0;
+                    for (const s of slices) size += s.byteLength;
+                    const buf = new Uint8Array(size);
+                    let off = 0;
+                    for (const s of slices) {
+                        buf.set(new Uint8Array(s), off);
+                        off += s.byteLength;
+                    }
+                    resolve(buf.buffer);
+                } catch (e) {
+                    reject(e);
+                }
+            }
+        );
+    });
+}
+
+function extractCellsFromTable(tbl) {
+    const cells = [];
+    let row = 0;
+    for (const tr of tbl.childNodes) {
+        if (tr.nodeType !== 1 || tr.namespaceURI !== A_NS || tr.localName !== 'tr') continue;
+        let col = 0;
+        for (const tc of tr.childNodes) {
+            if (tc.nodeType !== 1 || tc.namespaceURI !== A_NS || tc.localName !== 'tc') continue;
+            const parts = [];
+            const tEls = tc.getElementsByTagNameNS(A_NS, 't');
+            for (let i = 0; i < tEls.length; i++) {
+                if (tEls[i].textContent) parts.push(tEls[i].textContent);
+            }
+            const text = parts.join('');
+            if (text.trim()) cells.push({ row, col, text });
+            col++;
+        }
+        row++;
+    }
+    return cells;
+}
+
+async function parseTablesFromPptx() {
+    const data = await getPptxFile();
+    const zip = await JSZip.loadAsync(data);
+    const parser = new DOMParser();
+
+    // Resolve slide order from presentation.xml
+    const presXml = await zip.file('ppt/presentation.xml').async('text');
+    const presDoc = parser.parseFromString(presXml, 'application/xml');
+    const relsXml = await zip.file('ppt/_rels/presentation.xml.rels').async('text');
+    const relsDoc = parser.parseFromString(relsXml, 'application/xml');
+
+    const rIdMap = {};
+    const rels = relsDoc.getElementsByTagName('Relationship');
+    for (let i = 0; i < rels.length; i++) {
+        rIdMap[rels[i].getAttribute('Id')] = rels[i].getAttribute('Target');
+    }
+
+    const sldIds = presDoc.getElementsByTagNameNS(P_NS, 'sldId');
+    const slideFiles = [];
+    for (let i = 0; i < sldIds.length; i++) {
+        const rId = sldIds[i].getAttributeNS(R_NS, 'id');
+        if (rIdMap[rId]) slideFiles.push('ppt/' + rIdMap[rId]);
+    }
+
+    // Parse each slide — only top-level tables (direct children of spTree)
+    const result = {};
+    for (let si = 0; si < slideFiles.length; si++) {
+        const f = zip.file(slideFiles[si]);
+        if (!f) continue;
+        const xml = await f.async('text');
+        const doc = parser.parseFromString(xml, 'application/xml');
+
+        const spTree = doc.getElementsByTagNameNS(P_NS, 'spTree')[0];
+        if (!spTree) continue;
+
+        const tables = [];
+        for (const child of spTree.childNodes) {
+            if (child.nodeType !== 1) continue;
+            if (child.localName === 'graphicFrame' && child.namespaceURI === P_NS) {
+                const tbl = child.getElementsByTagNameNS(A_NS, 'tbl')[0];
+                if (!tbl) continue;
+                const cells = extractCellsFromTable(tbl);
+                if (cells.length > 0) tables.push(cells);
+            }
+        }
+        if (tables.length > 0) result[si] = tables;
+    }
+
+    return result;
+}
+
+// ---- Shape extraction functions ----
+
 async function captureFormatting(textFrame, context) {
     const fontProps = ['bold', 'italic', 'color', 'size', 'name', 'underline'];
 
@@ -70,12 +191,12 @@ async function extractTextShape(shape, shapeIndex, context, slideTexts, canCaptu
     }
 }
 
-async function extractTableCells(shape, shapeIndex, context, slideTexts) {
+async function extractTableCells(shape, shapeIndex, context, slideTexts, pptxCells) {
+    // Try Office.js Table API first (works in some environments)
     try {
         const table = shape.table;
+        if (!table) throw new Error('shape.table is undefined');
 
-        // Get dimensions — this sync is where InvalidArgument throws
-        // if the table proxy isn't actually usable
         table.rows.load('count');
         const firstRow = table.rows.getItemAt(0);
         firstRow.load('cellCount');
@@ -84,7 +205,6 @@ async function extractTableCells(shape, shapeIndex, context, slideTexts) {
         const rowCount = table.rows.count;
         const colCount = firstRow.cellCount;
 
-        // Per-row sync: each row is independent so one bad row doesn't kill the rest
         for (let r = 0; r < rowCount; r++) {
             try {
                 const rowCells = [];
@@ -112,23 +232,25 @@ async function extractTableCells(shape, shapeIndex, context, slideTexts) {
                 console.warn(`Table row ${r} extraction failed:`, e.message);
             }
         }
+        return; // API succeeded
     } catch (e) {
-        // Table API unavailable (proxy returned but sync throws InvalidArgument)
-        // Fall back to textFrame which may give concatenated table text
-        console.warn(`Table cell API failed for shape ${shapeIndex}:`, e.message);
-        try {
-            const textRange = shape.textFrame.textRange;
-            textRange.load('text');
-            await context.sync();
-            const text = textRange.text;
-            if (text && text.trim()) {
-                console.log(`Shape ${shapeIndex}: recovered table text via textFrame`);
-                slideTexts.push({ shapeIndex, text, fontData: null });
-            }
-        } catch (e2) {
-            // Both table API and textFrame failed — nothing more we can do
-            console.warn(`Shape ${shapeIndex} (Table): both table API and textFrame failed — skipping`);
+        console.warn(`Table API unavailable for shape ${shapeIndex}:`, e.message);
+    }
+
+    // Fallback: use pre-parsed PPTX table data
+    if (pptxCells && pptxCells.length > 0) {
+        console.log(`Shape ${shapeIndex}: recovered ${pptxCells.length} table cells from PPTX`);
+        for (const cell of pptxCells) {
+            slideTexts.push({
+                shapeIndex,
+                text: cell.text,
+                fontData: null,
+                row: cell.row,
+                col: cell.col
+            });
         }
+    } else {
+        console.warn(`Shape ${shapeIndex} (Table): no PPTX data available — skipping`);
     }
 }
 
@@ -225,6 +347,15 @@ async function extractGroupShapes(shape, shapeIndex, context, slideTexts, canCap
 export async function extractAllText() {
     const slides = [];
 
+    // Pre-parse PPTX for table text (fallback when Table API is unavailable)
+    let pptxTables = null;
+    try {
+        pptxTables = await parseTablesFromPptx();
+        console.log('PPTX parsed:', Object.keys(pptxTables).length, 'slide(s) with tables');
+    } catch (e) {
+        console.warn('PPTX table parsing unavailable:', e.message);
+    }
+
     await PowerPoint.run(async (context) => {
         const slideCollection = context.presentation.slides;
         slideCollection.load('items');
@@ -251,6 +382,7 @@ export async function extractAllText() {
             }
 
             const slideTexts = [];
+            let tableOrdinal = 0;
 
             for (let j = 0; j < shapes.items.length; j++) {
                 const shape = shapes.items[j];
@@ -261,7 +393,8 @@ export async function extractAllText() {
 
                 try {
                     if (shapeType === 'Table') {
-                        await extractTableCells(shape, j, context, slideTexts);
+                        await extractTableCells(shape, j, context, slideTexts, pptxTables?.[i]?.[tableOrdinal]);
+                        tableOrdinal++;
                     } else if (shapeType === 'Group') {
                         await extractGroupShapes(shape, j, context, slideTexts, canCaptureFormatting);
                     } else {
@@ -273,7 +406,7 @@ export async function extractAllText() {
                     let recovered = false;
                     if (shapeType !== 'Table') {
                         try {
-                            await extractTableCells(shape, j, context, slideTexts);
+                            await extractTableCells(shape, j, context, slideTexts, null);
                             recovered = true;
                         } catch (e2) { /* not a table */ }
                     }
