@@ -12,17 +12,10 @@ interface TextItem {
   text: string;
 }
 
-interface Finding {
-  type: string;
-  original: string;
-  suggestion: string;
-  occurrences: { slideIndex: number; shapeIndex: number }[];
-  confidence: number;
-}
-
-interface AnalysisResponse {
-  findings: Finding[];
-  warnings: { type: string; slideIndex?: number; message: string }[];
+interface RewriteItem {
+  slideIndex: number;
+  shapeIndex: number;
+  rewrittenText: string;
 }
 
 Deno.serve(async (req: Request) => {
@@ -41,59 +34,48 @@ Deno.serve(async (req: Request) => {
 
     if (!texts || texts.length === 0) {
       return new Response(
-        JSON.stringify({ findings: [], warnings: [] }),
+        JSON.stringify({ rewrites: [] }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
     // Prepare context for GPT
-    const slideTexts = texts.map(t =>
-      `[Slide ${t.slideIndex + 1}, Shape ${t.shapeIndex}]: ${t.text}`
-    ).join("\n");
+    const textEntries = texts.map(t =>
+      `{ "slideIndex": ${t.slideIndex}, "shapeIndex": ${t.shapeIndex}, "text": ${JSON.stringify(t.text)} }`
+    ).join(",\n");
 
-    const systemPrompt = `Du är en expert på att identifiera känslig affärsinformation i konsultpresentationer.
+    const systemPrompt = `Du är en expert på att anonymisera konsultpresentationer.
 
-Din uppgift är att analysera text från PowerPoint-slides och identifiera information som bör anonymiseras innan presentationen delas externt.
+Du får text från enskilda shapes i en PowerPoint-presentation.
+Skriv om VARJE text så att ALL identifierande information ersätts med generiska platshållare.
 
-Identifiera följande typer av känslig information:
-- **company**: Kundnamn, företagsnamn, organisationer (ej generiska termer som "kunden" eller "företaget")
-- **person**: Personnamn (för- och efternamn)
-- **email**: E-postadresser
-- **phone**: Telefonnummer
-- **financial**: Specifika belopp, intäkter, kostnader (t.ex. "45 MSEK", "2,3 miljoner")
-- **percentage**: Specifika procentsatser som kan vara känsliga (marknadsandelar, tillväxt)
-- **date**: Specifika datum som kan identifiera projekt
-- **project**: Projektnamn eller kodnamn
-- **address**: Fysiska adresser
-- **other**: Annan känslig information
+Regler:
+- Företagsnamn → [Företag A], [Företag B] etc. (konsekvent genom hela presentationen)
+- Personnamn → [Projektledare], [Kontaktperson], [Konsult] etc.
+- E-postadresser → [email]
+- Telefonnummer → [telefon]
+- Specifika belopp → [X MSEK], [belopp] etc.
+- Specifika procent → [X]%
+- Datum → [datum] eller [kvartal] etc.
+- Adresser → [adress]
+- Projektnamn/kodnamn → [Projekt A], [Projekt B] etc.
 
-För varje fynd, föreslå en lämplig anonym ersättning:
-- Företag → [Klient A], [Klient B], etc.
-- Personer → [Projektledare], [Kontaktperson], [Konsult], etc.
-- Belopp → [X MSEK], [belopp], etc.
-- E-post → [email borttagen]
+KRITISKT:
+- Behåll EXAKT samma antal rader (radbrytningar) i varje text
+- Behåll samma struktur, ton och längd
+- Text som redan är generisk eller inte innehåller känslig info ska returneras oförändrad
+- Var konsekvent — samma företag ska alltid bli samma platshållare
 
 Svara ENDAST med giltig JSON i följande format:
 {
-  "findings": [
-    {
-      "type": "company",
-      "original": "Volvo",
-      "suggestion": "[Klient A]",
-      "confidence": 0.95
-    }
+  "rewrites": [
+    { "slideIndex": 0, "shapeIndex": 0, "rewrittenText": "..." }
   ]
-}
+}`;
 
-Var noggrann:
-- Inkludera INTE generiska termer som redan är anonyma
-- Inkludera INTE vanliga ord som råkar matcha företagsnamn i fel kontext
-- Var konsekvent - samma företag ska alltid bli [Klient A], samma person ska alltid få samma ersättning
-- confidence ska vara 0.0-1.0 baserat på hur säker du är`;
+    const userPrompt = `Anonymisera följande texter från en presentation. Returnera en omskrivning per shape:
 
-    const userPrompt = `Analysera följande text från en presentation och identifiera känslig information:
-
-${slideTexts}`;
+[${textEntries}]`;
 
     // Call OpenAI API
     const openaiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -127,40 +109,14 @@ ${slideTexts}`;
     }
 
     const parsed = JSON.parse(content);
-    const findings: Finding[] = [];
-
-    // Map findings back to slide/shape locations
-    for (const finding of parsed.findings || []) {
-      const occurrences: { slideIndex: number; shapeIndex: number }[] = [];
-
-      // Find all occurrences of this text in the original data
-      for (const textItem of texts) {
-        if (textItem.text.includes(finding.original)) {
-          occurrences.push({
-            slideIndex: textItem.slideIndex,
-            shapeIndex: textItem.shapeIndex,
-          });
-        }
-      }
-
-      if (occurrences.length > 0) {
-        findings.push({
-          type: finding.type,
-          original: finding.original,
-          suggestion: finding.suggestion,
-          confidence: finding.confidence || 0.8,
-          occurrences,
-        });
-      }
-    }
-
-    const response: AnalysisResponse = {
-      findings,
-      warnings: [],
-    };
+    const rewrites: RewriteItem[] = (parsed.rewrites || []).map((r: RewriteItem) => ({
+      slideIndex: r.slideIndex,
+      shapeIndex: r.shapeIndex,
+      rewrittenText: r.rewrittenText,
+    }));
 
     return new Response(
-      JSON.stringify(response),
+      JSON.stringify({ rewrites }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
 

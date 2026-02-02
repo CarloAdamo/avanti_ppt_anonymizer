@@ -1,12 +1,8 @@
 // Avanti PPT Anonymizer
-// Skannar och anonymiserar känslig information i PowerPoint-presentationer
+// Anonymiserar presentationer genom att skriva om text med AI
 
 const SUPABASE_URL = 'https://vnjcwffdhywckwnjothu.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZuamN3ZmZkaHl3Y2t3bmpvdGh1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU4NjA4MTAsImV4cCI6MjA4MTQzNjgxMH0.ETCptr-BYt7wunTOXVAsBCsv9L9kICR30GGHoC5X3ZQ';
-
-// State
-let findings = [];
-let slideData = [];
 
 // Initialize Office
 Office.onReady((info) => {
@@ -17,31 +13,20 @@ Office.onReady((info) => {
 });
 
 function initializeUI() {
-    // Scan button
-    document.getElementById('scan-btn').addEventListener('click', scanPresentation);
-
-    // Select all button
-    document.getElementById('select-all-btn').addEventListener('click', toggleSelectAll);
-
-    // Anonymize button
-    document.getElementById('anonymize-btn').addEventListener('click', anonymizeSelected);
-
-    // Rescan buttons
-    document.getElementById('rescan-btn').addEventListener('click', resetAndScan);
-    document.getElementById('new-scan-btn').addEventListener('click', resetAndScan);
+    document.getElementById('scan-btn').addEventListener('click', anonymizePresentation);
+    document.getElementById('new-scan-btn').addEventListener('click', resetAndAnonymize);
 }
 
 // ============================================
-// SCANNING
+// MAIN FLOW
 // ============================================
 
-async function scanPresentation() {
-    showLoading('Extraherar text från presentationen...');
+async function anonymizePresentation() {
     hideStatus();
 
     try {
-        // Step 1: Extract all text from slides
-        slideData = await extractAllText();
+        showLoading('Extraherar text...');
+        const slideData = await extractAllText();
 
         if (slideData.length === 0) {
             hideLoading();
@@ -49,34 +34,37 @@ async function scanPresentation() {
             return;
         }
 
-        showLoading('Analyserar innehåll med AI...');
+        showLoading('AI skriver om text...');
+        const rewrites = await anonymizeWithAI(slideData);
 
-        // Step 2: Analyze with AI
-        findings = await analyzeWithAI(slideData);
-
-        hideLoading();
-
-        if (findings.length === 0) {
-            showStatus('Ingen känslig information hittades!', 'success');
+        if (rewrites.length === 0) {
+            hideLoading();
+            showStatus('Ingen text behövde anonymiseras.', 'success');
             return;
         }
 
-        // Step 3: Show findings
-        displayFindings(findings);
+        showLoading('Ersätter text...');
+        const count = await replaceAllShapes(slideData, rewrites);
+
+        hideLoading();
+        showDoneSection(count);
 
     } catch (error) {
         hideLoading();
-        console.error('Scan error:', error);
+        console.error('Anonymization error:', error);
         showStatus('Ett fel uppstod: ' + error.message, 'error');
     }
 }
+
+// ============================================
+// TEXT EXTRACTION
+// ============================================
 
 async function extractAllText() {
     const slides = [];
 
     await PowerPoint.run(async (context) => {
-        const presentation = context.presentation;
-        const slideCollection = presentation.slides;
+        const slideCollection = context.presentation.slides;
         slideCollection.load('items');
         await context.sync();
 
@@ -88,33 +76,28 @@ async function extractAllText() {
 
             const slideTexts = [];
 
-            // Process each shape individually with error handling
             for (let j = 0; j < shapes.items.length; j++) {
                 try {
                     const shape = shapes.items[j];
-                    const textFrame = shape.textFrame;
-                    const textRange = textFrame.textRange;
+                    const textRange = shape.textFrame.textRange;
                     textRange.load('text');
                     await context.sync();
 
                     const text = textRange.text;
                     if (text && text.trim()) {
-                        slideTexts.push({
-                            shapeIndex: j,
-                            text: text
-                        });
+                        let fontData = null;
+                        if (Office.context.requirements.isSetSupported('PowerPointApi', '1.4')) {
+                            fontData = await captureFormatting(shape, context);
+                        }
+                        slideTexts.push({ shapeIndex: j, text, fontData });
                     }
                 } catch (e) {
-                    // Shape has no text frame or text, skip it
                     continue;
                 }
             }
 
             if (slideTexts.length > 0) {
-                slides.push({
-                    slideIndex: i,
-                    texts: slideTexts
-                });
+                slides.push({ slideIndex: i, texts: slideTexts });
             }
         }
     });
@@ -123,12 +106,72 @@ async function extractAllText() {
 }
 
 // ============================================
-// AI ANALYSIS
+// FORMAT CAPTURE
 // ============================================
 
-async function analyzeWithAI(slideData) {
-    // Prepare text for analysis
-    const allTexts = slideData.flatMap(slide =>
+async function captureFormatting(shape, context) {
+    const fontProps = ['bold', 'italic', 'color', 'size', 'name', 'underline'];
+
+    try {
+        const textRange = shape.textFrame.textRange;
+        textRange.font.load(fontProps);
+        await context.sync();
+
+        // Check if formatting is uniform across the whole shape
+        const wholeFont = {};
+        let isUniform = true;
+        for (const prop of fontProps) {
+            const val = textRange.font[prop];
+            if (val === null) { isUniform = false; break; }
+            wholeFont[prop] = val;
+        }
+
+        if (isUniform) {
+            return { type: 'uniform', font: wholeFont };
+        }
+
+        // Mixed formatting — capture per paragraph
+        const text = textRange.text;
+        const paragraphs = text.split('\r');
+        let offset = 0;
+        const paragraphFonts = [];
+
+        for (const para of paragraphs) {
+            if (para.length > 0) {
+                try {
+                    const subRange = textRange.getSubstring(offset, para.length);
+                    subRange.font.load(fontProps);
+                    await context.sync();
+
+                    const paraFont = {};
+                    for (const prop of fontProps) {
+                        const val = subRange.font[prop];
+                        if (val !== null && val !== undefined) paraFont[prop] = val;
+                    }
+                    paragraphFonts.push(paraFont);
+                } catch (e) {
+                    paragraphFonts.push({});
+                }
+            } else {
+                paragraphFonts.push({});
+            }
+            offset += para.length + 1; // +1 for \r
+        }
+
+        return { type: 'perParagraph', fonts: paragraphFonts };
+
+    } catch (e) {
+        console.warn('Could not capture formatting:', e);
+        return null;
+    }
+}
+
+// ============================================
+// AI ANONYMIZATION
+// ============================================
+
+async function anonymizeWithAI(slideData) {
+    const texts = slideData.flatMap(slide =>
         slide.texts.map(t => ({
             slideIndex: slide.slideIndex,
             shapeIndex: t.shapeIndex,
@@ -137,14 +180,13 @@ async function analyzeWithAI(slideData) {
     );
 
     try {
-        // Call Edge Function for AI analysis
         const response = await fetch(`${SUPABASE_URL}/functions/v1/analyze-presentation`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
             },
-            body: JSON.stringify({ texts: allTexts })
+            body: JSON.stringify({ texts })
         });
 
         if (!response.ok) {
@@ -152,269 +194,145 @@ async function analyzeWithAI(slideData) {
         }
 
         const result = await response.json();
-        return result.findings || [];
+        return result.rewrites || [];
 
     } catch (error) {
         console.warn('AI analysis unavailable, using local patterns:', error);
-        // Fallback to local pattern matching
-        return analyzeWithPatterns(allTexts);
+        return rewriteWithPatterns(texts);
     }
 }
 
-// Local pattern-based analysis (fallback)
-function analyzeWithPatterns(texts) {
-    const findings = [];
+// Local pattern-based rewrite (fallback)
+function rewriteWithPatterns(texts) {
     const patterns = [
-        {
-            type: 'email',
-            regex: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
-            suggestion: '[email borttagen]'
-        },
-        {
-            type: 'phone',
-            regex: /(?:\+46|0)[\s-]?(?:\d[\s-]?){8,11}/g,
-            suggestion: '[telefon borttagen]'
-        },
-        {
-            type: 'personnummer',
-            regex: /\d{6,8}[-\s]?\d{4}/g,
-            suggestion: '[personnummer borttaget]'
-        },
-        {
-            type: 'financial',
-            regex: /\d+(?:[,.\s]\d{3})*(?:[,.\s]\d+)?\s*(?:kr|SEK|MSEK|TSEK|EUR|USD|miljoner|miljarder)/gi,
-            suggestion: '[belopp borttaget]'
-        },
-        {
-            type: 'percentage',
-            regex: /\d+(?:[,.]\d+)?\s*%/g,
-            suggestion: '[X] %'
-        },
-        {
-            type: 'url',
-            regex: /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi,
-            suggestion: '[URL borttagen]'
-        }
+        { regex: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, replacement: '[email]' },
+        { regex: /(?:\+46|0)[\s-]?(?:\d[\s-]?){8,11}/g, replacement: '[telefon]' },
+        { regex: /\d{6,8}[-\s]?\d{4}/g, replacement: '[personnummer]' },
+        { regex: /\d+(?:[,.\s]\d{3})*(?:[,.\s]\d+)?\s*(?:kr|SEK|MSEK|TSEK|EUR|USD|miljoner|miljarder)/gi, replacement: '[belopp]' },
+        { regex: /\d+(?:[,.]\d+)?\s*%/g, replacement: '[X]%' },
+        { regex: /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi, replacement: '[URL]' }
     ];
 
-    // Track unique findings
-    const foundItems = new Map();
+    const rewrites = [];
 
-    for (const textItem of texts) {
-        for (const pattern of patterns) {
-            const matches = textItem.text.match(pattern.regex);
-            if (matches) {
-                for (const match of matches) {
-                    const key = `${pattern.type}:${match}`;
-                    if (!foundItems.has(key)) {
-                        foundItems.set(key, {
-                            type: pattern.type,
-                            original: match,
-                            suggestion: pattern.suggestion,
-                            occurrences: []
-                        });
-                    }
-                    foundItems.get(key).occurrences.push({
-                        slideIndex: textItem.slideIndex,
-                        shapeIndex: textItem.shapeIndex
-                    });
-                }
-            }
+    for (const item of texts) {
+        let rewritten = item.text;
+        for (const p of patterns) {
+            rewritten = rewritten.replace(p.regex, p.replacement);
+        }
+        if (rewritten !== item.text) {
+            rewrites.push({
+                slideIndex: item.slideIndex,
+                shapeIndex: item.shapeIndex,
+                rewrittenText: rewritten
+            });
         }
     }
 
-    return Array.from(foundItems.values());
+    return rewrites;
 }
 
 // ============================================
-// UI DISPLAY
+// TEXT REPLACEMENT WITH FORMAT PRESERVATION
 // ============================================
 
-function displayFindings(findings) {
-    const findingsList = document.getElementById('findings-list');
-    findingsList.innerHTML = '';
+async function replaceAllShapes(slideData, rewrites) {
+    let count = 0;
 
-    findings.forEach((finding, index) => {
-        const item = document.createElement('div');
-        item.className = 'finding-item';
-        item.innerHTML = `
-            <input type="checkbox" class="finding-checkbox" data-index="${index}" checked>
-            <div class="finding-content">
-                <span class="finding-type ${finding.type}">${getTypeLabel(finding.type)}</span>
-                <div>
-                    <span class="finding-original">${escapeHtml(finding.original)}</span>
-                </div>
-                <div class="finding-replacement">
-                    <span class="finding-arrow">→</span>
-                    <input type="text" value="${escapeHtml(finding.suggestion)}" data-index="${index}">
-                </div>
-                <div class="finding-occurrences">
-                    ${finding.occurrences.length} förekomst${finding.occurrences.length > 1 ? 'er' : ''}
-                    på slide ${[...new Set(finding.occurrences.map(o => o.slideIndex + 1))].join(', ')}
-                </div>
-            </div>
-        `;
-        findingsList.appendChild(item);
-    });
+    const rewriteMap = new Map();
+    for (const r of rewrites) {
+        rewriteMap.set(`${r.slideIndex}-${r.shapeIndex}`, r.rewrittenText);
+    }
 
-    // Update count
-    document.getElementById('findings-count').textContent = findings.length;
+    const fontMap = new Map();
+    for (const slide of slideData) {
+        for (const t of slide.texts) {
+            fontMap.set(`${slide.slideIndex}-${t.shapeIndex}`, t.fontData);
+        }
+    }
 
-    // Show findings section
-    document.getElementById('scan-section').classList.add('hidden');
-    document.getElementById('findings-section').classList.remove('hidden');
-    document.getElementById('done-section').classList.add('hidden');
+    await PowerPoint.run(async (context) => {
+        const slideCollection = context.presentation.slides;
+        slideCollection.load('items');
+        await context.sync();
 
-    // Enable/disable anonymize button based on selections
-    updateAnonymizeButton();
-
-    // Add event listeners for checkboxes and inputs
-    document.querySelectorAll('.finding-checkbox').forEach(cb => {
-        cb.addEventListener('change', updateAnonymizeButton);
-    });
-
-    document.querySelectorAll('.finding-replacement input').forEach(input => {
-        input.addEventListener('input', (e) => {
-            const index = parseInt(e.target.dataset.index);
-            findings[index].suggestion = e.target.value;
-        });
-    });
-}
-
-function getTypeLabel(type) {
-    const labels = {
-        'company': 'Företag',
-        'person': 'Person',
-        'email': 'E-post',
-        'phone': 'Telefon',
-        'personnummer': 'Personnr',
-        'financial': 'Belopp',
-        'percentage': 'Procent',
-        'date': 'Datum',
-        'url': 'URL',
-        'other': 'Övrigt'
-    };
-    return labels[type] || type;
-}
-
-function updateAnonymizeButton() {
-    const checked = document.querySelectorAll('.finding-checkbox:checked');
-    const btn = document.getElementById('anonymize-btn');
-    btn.disabled = checked.length === 0;
-    btn.textContent = checked.length > 0
-        ? `🔒 Anonymisera ${checked.length} valda`
-        : '🔒 Anonymisera valda';
-}
-
-function toggleSelectAll() {
-    const checkboxes = document.querySelectorAll('.finding-checkbox');
-    const allChecked = Array.from(checkboxes).every(cb => cb.checked);
-    checkboxes.forEach(cb => cb.checked = !allChecked);
-    updateAnonymizeButton();
-
-    const btn = document.getElementById('select-all-btn');
-    btn.textContent = allChecked ? 'Välj alla' : 'Avmarkera alla';
-}
-
-// ============================================
-// ANONYMIZATION
-// ============================================
-
-async function anonymizeSelected() {
-    const selectedIndices = Array.from(document.querySelectorAll('.finding-checkbox:checked'))
-        .map(cb => parseInt(cb.dataset.index));
-
-    if (selectedIndices.length === 0) return;
-
-    showLoading('Anonymiserar...');
-
-    try {
-        let replacedCount = 0;
-
-        await PowerPoint.run(async (context) => {
-            const presentation = context.presentation;
-            const slideCollection = presentation.slides;
-            slideCollection.load('items');
+        for (const slide of slideData) {
+            const pptSlide = slideCollection.items[slide.slideIndex];
+            const shapes = pptSlide.shapes;
+            shapes.load('items');
             await context.sync();
 
-            for (const index of selectedIndices) {
-                const finding = findings[index];
+            for (const t of slide.texts) {
+                const key = `${slide.slideIndex}-${t.shapeIndex}`;
+                const newText = rewriteMap.get(key);
+                if (!newText || newText === t.text) continue;
 
-                // Group occurrences by slide for efficiency
-                const occurrencesBySlide = new Map();
-                for (const occ of finding.occurrences) {
-                    if (!occurrencesBySlide.has(occ.slideIndex)) {
-                        occurrencesBySlide.set(occ.slideIndex, []);
-                    }
-                    occurrencesBySlide.get(occ.slideIndex).push(occ.shapeIndex);
-                }
-
-                // Replace in each slide
-                for (const [slideIndex, shapeIndices] of occurrencesBySlide) {
-                    const slide = slideCollection.items[slideIndex];
-                    const shapes = slide.shapes;
-                    shapes.load('items');
-                    await context.sync();
-
-                    // Get unique shape indices
-                    const uniqueShapes = [...new Set(shapeIndices)];
-
-                    for (const shapeIndex of uniqueShapes) {
-                        const shape = shapes.items[shapeIndex];
-                        try {
-                            shape.textFrame.textRange.load('text');
-                            await context.sync();
-
-                            let text = shape.textFrame.textRange.text;
-                            const originalText = text;
-
-                            // Replace all occurrences in this shape
-                            text = text.split(finding.original).join(finding.suggestion);
-
-                            if (text !== originalText) {
-                                shape.textFrame.textRange.text = text;
-                                await context.sync();
-                                replacedCount++;
-                            }
-                        } catch (e) {
-                            console.warn('Could not replace in shape:', e);
-                        }
-                    }
+                try {
+                    const shape = shapes.items[t.shapeIndex];
+                    const fontData = fontMap.get(key);
+                    await replaceWithFormatting(shape, context, newText, fontData);
+                    count++;
+                } catch (e) {
+                    console.warn('Could not replace shape:', e);
                 }
             }
-        });
+        }
+    });
 
-        hideLoading();
-        showDoneSection(replacedCount);
+    return count;
+}
 
-    } catch (error) {
-        hideLoading();
-        console.error('Anonymization error:', error);
-        showStatus('Ett fel uppstod vid anonymisering: ' + error.message, 'error');
+async function replaceWithFormatting(shape, context, newText, fontData) {
+    const textRange = shape.textFrame.textRange;
+    textRange.text = newText;
+    await context.sync();
+
+    if (!fontData) return;
+
+    if (fontData.type === 'uniform') {
+        for (const [prop, val] of Object.entries(fontData.font)) {
+            textRange.font[prop] = val;
+        }
+        await context.sync();
+        return;
+    }
+
+    if (fontData.type === 'perParagraph') {
+        const paragraphs = newText.split('\r');
+        let offset = 0;
+
+        for (let i = 0; i < paragraphs.length && i < fontData.fonts.length; i++) {
+            if (paragraphs[i].length > 0) {
+                try {
+                    const subRange = textRange.getSubstring(offset, paragraphs[i].length);
+                    for (const [prop, val] of Object.entries(fontData.fonts[i])) {
+                        subRange.font[prop] = val;
+                    }
+                } catch (e) {
+                    console.warn('Could not apply paragraph formatting:', e);
+                }
+            }
+            offset += paragraphs[i].length + 1;
+        }
+        await context.sync();
     }
 }
+
+// ============================================
+// UI HELPERS
+// ============================================
 
 function showDoneSection(count) {
     document.getElementById('scan-section').classList.add('hidden');
-    document.getElementById('findings-section').classList.add('hidden');
     document.getElementById('done-section').classList.remove('hidden');
     document.getElementById('replaced-count').textContent = count;
 }
 
-// ============================================
-// UTILITY FUNCTIONS
-// ============================================
-
-function resetAndScan() {
-    findings = [];
-    slideData = [];
-
+function resetAndAnonymize() {
     document.getElementById('scan-section').classList.remove('hidden');
-    document.getElementById('findings-section').classList.add('hidden');
     document.getElementById('done-section').classList.add('hidden');
-
     hideStatus();
-    scanPresentation();
+    anonymizePresentation();
 }
 
 function showLoading(text) {
@@ -435,10 +353,4 @@ function showStatus(message, type) {
 
 function hideStatus() {
     document.getElementById('status').classList.add('hidden');
-}
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
 }
