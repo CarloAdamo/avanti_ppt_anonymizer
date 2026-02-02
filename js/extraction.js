@@ -82,29 +82,32 @@ async function extractTableCells(shape, shapeIndex, context, slideTexts) {
     const rowCount = table.rows.count;
     const colCount = firstRow.cellCount;
 
-    // Batch load all cell texts using getCell
-    const cellRefs = [];
+    // Per-row sync: each row is independent so one bad row doesn't kill the rest
     for (let r = 0; r < rowCount; r++) {
-        for (let c = 0; c < colCount; c++) {
-            try {
-                const cell = table.getCell(r, c);
-                cell.body.textRange.load('text');
-                cellRefs.push({ row: r, col: c, cell });
-            } catch (e) {
-                // Merged or inaccessible cell
-            }
-        }
-    }
-    await context.sync();
-
-    for (const { row, col, cell } of cellRefs) {
         try {
-            const text = cell.body.textRange.text;
-            if (text && text.trim()) {
-                slideTexts.push({ shapeIndex, text, fontData: null, row, col });
+            const rowCells = [];
+            for (let c = 0; c < colCount; c++) {
+                try {
+                    const cell = table.getCell(r, c);
+                    cell.body.textRange.load('text');
+                    rowCells.push({ row: r, col: c, cell });
+                } catch (e) {
+                    // Merged or inaccessible cell
+                }
+            }
+            await context.sync();
+            for (const { row, col, cell } of rowCells) {
+                try {
+                    const text = cell.body.textRange.text;
+                    if (text && text.trim()) {
+                        slideTexts.push({ shapeIndex, text, fontData: null, row, col });
+                    }
+                } catch (e) {
+                    // Cell text couldn't be read
+                }
             }
         } catch (e) {
-            // Cell text couldn't be read
+            console.warn(`Table row ${r} extraction failed:`, e.message);
         }
     }
 }
@@ -137,24 +140,30 @@ async function extractGroupShapes(shape, shapeIndex, context, slideTexts, canCap
 
                 const rowCount = childTable.rows.count;
                 const colCount = childFirstRow.cellCount;
-                const cellRefs = [];
+
+                // Per-row sync: each row is independent
                 for (let r = 0; r < rowCount; r++) {
-                    for (let c = 0; c < colCount; c++) {
-                        try {
-                            const cell = childTable.getCell(r, c);
-                            cell.body.textRange.load('text');
-                            cellRefs.push({ row: r, col: c, cell });
-                        } catch (e) { /* merged cell */ }
-                    }
-                }
-                await context.sync();
-                for (const { row, col, cell } of cellRefs) {
                     try {
-                        const text = cell.body.textRange.text;
-                        if (text && text.trim()) {
-                            slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData: null, row, col });
+                        const rowCells = [];
+                        for (let c = 0; c < colCount; c++) {
+                            try {
+                                const cell = childTable.getCell(r, c);
+                                cell.body.textRange.load('text');
+                                rowCells.push({ row: r, col: c, cell });
+                            } catch (e) { /* merged cell */ }
                         }
-                    } catch (e) { /* skip */ }
+                        await context.sync();
+                        for (const { row, col, cell } of rowCells) {
+                            try {
+                                const text = cell.body.textRange.text;
+                                if (text && text.trim()) {
+                                    slideTexts.push({ shapeIndex, groupChildIndex: k, text, fontData: null, row, col });
+                                }
+                            } catch (e) { /* skip */ }
+                        }
+                    } catch (e) {
+                        console.warn(`Group table row ${r} extraction failed:`, e.message);
+                    }
                 }
             } else {
                 // Text shape within a group
@@ -224,18 +233,21 @@ export async function extractAllText() {
                         await extractTextShape(shape, j, context, slideTexts, canCaptureFormatting);
                     }
                 } catch (e) {
-                    // If type-based dispatch failed, try fallback cascade
-                    if (!typesLoaded) {
+                    // Primary extraction failed — try other methods as fallback
+                    let recovered = false;
+                    if (shapeType !== 'Table') {
                         try {
                             await extractTableCells(shape, j, context, slideTexts);
-                        } catch (e2) {
-                            try {
-                                await extractGroupShapes(shape, j, context, slideTexts, canCaptureFormatting);
-                            } catch (e3) {
-                                continue;
-                            }
-                        }
-                    } else {
+                            recovered = true;
+                        } catch (e2) { /* not a table */ }
+                    }
+                    if (!recovered && shapeType !== 'Group') {
+                        try {
+                            await extractGroupShapes(shape, j, context, slideTexts, canCaptureFormatting);
+                            recovered = true;
+                        } catch (e3) { /* not a group */ }
+                    }
+                    if (!recovered) {
                         console.warn(`Skipping shape ${j} (type: ${shapeType}):`, e.message);
                     }
                 }
