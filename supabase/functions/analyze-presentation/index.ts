@@ -50,51 +50,53 @@ Deno.serve(async (req: Request) => {
       return `{ "id": ${s.id}, ${content}${tablePart} }`;
     }).join(",\n");
 
-    const systemPrompt = `Du klassificerar text från PowerPoint-shapes i konsultpresentationer och genererar beskrivande mall-texter.
-Syftet är att GENERALISERA presentationen — allt specifikt innehåll ersätts med en kort beskrivning av vad texten handlar om. Resultatet ska vara sökbart och återanvändbart som mall.
+    const systemPrompt = `You classify text from PowerPoint shapes in consulting presentations and generate FULL REPLACEMENT TEXT that preserves the visual layout of the slide.
 
-Kategorier:
-- title: Huvudrubrik på en slide
-- body: Beskrivande text, punktlistor, aktiviteter, KPI:er, affärsmål, strategier
-- name: Personnamn eller rollreferenser
-- label_value: "Etikett: Värde"-mönster (ange label-delen i "label"-fältet)
-- table_header: Strukturella kolumn-/radrubrik (t.ex. "Aktivitet", "Status", "Ansvarig")
-- keep: ENBART helt generiska enstaka ord som "Syfte", "Mål", "Agenda"
+The goal is to ANONYMIZE the presentation — all identifying details (company names, person names, numbers, industry-specific information, project names, dates, locations, confidential data) are replaced with generic but realistic alternatives. The replacement text must read like real consulting text, NOT like a meta-description.
 
-VIKTIGT: Använd keep SPARSAMT. De flesta shapes innehåller specifikt innehåll.
+CRITICAL RULE: The replacement text MUST be written in the SAME LANGUAGE as the original text. If the original is in English, write the replacement in English. If the original is in Swedish, write in Swedish. NEVER translate.
 
-## Rewrite-regler
+Categories:
+- title: Main heading on a slide
+- body: Descriptive text, bullet points, activities, KPIs, business goals, strategies
+- name: Person names or role references
+- label_value: "Label: Value" pattern (put the label part in the "label" field)
+- table_header: Structural column/row headers (e.g. "Activity", "Status", "Responsible")
+- keep: ONLY completely generic single words like "Purpose", "Goals", "Agenda"
 
-För varje shape (utom keep och table_header), generera ett "rewrite"-fält med en BESKRIVANDE MALL-TEXT:
+IMPORTANT: Use keep SPARINGLY. Most shapes contain specific content.
 
-- **title**: "Rubrik om [ämne och syfte i 5-10 ord]"
-- **body** (kort text, 1 mening): "Mening om [ämne]"
-- **body** (längre text): "Stycke om [ämne, poäng och syfte i 10-20 ord]"
-- **name**: En generisk rolltitel, t.ex. "[Projektledare]", "[Konsult]", "[Avdelningschef]"
-- **label_value**: Beskriv bara värde-delen: t.ex. "beskrivning av metriken" eller "namn på ansvarig person"
-- **Tabellceller** (har isTableCell: true): Kort beskrivning av cellens innehåll i 2-5 ord
+## Rewrite rules
 
-Skriv beskrivningen på SAMMA SPRÅK som originaltexten.
-Fånga ämne och syfte men ta bort alla specifika namn, siffror, och detaljer.
+For each shape (except keep and table_header), generate a "rewrite" field with FULL REPLACEMENT TEXT:
 
-## Flerraderstext (paragraphs)
+- **title**: Write a complete heading of approximately the same length. Replace specific details with generic alternatives. Example: "Volvo Q3 Strategy Review" → "Quarterly Strategy Review for the Organization"
+- **body** (short text, 1 sentence): Write a complete sentence of similar length. Replace identifying details but keep the meaning and tone.
+- **body** (longer text): Write complete replacement text with APPROXIMATELY THE SAME WORD COUNT as the original. Keep the same structure (bullet points stay as bullet points, paragraphs stay as paragraphs). Replace all identifying details with generic but realistic consulting language.
+- **name**: A generic role title in the SAME LANGUAGE as the original, e.g. "[Project Manager]" for English text, "[Projektledare]" for Swedish text, "[Konsult]", "[Avdelningschef]"
+- **label_value**: Write a realistic generic value. Example: "45 MSEK" → "[X] MSEK", "Erik Svensson" → "[Project Manager]"
+- **Table cells** (have isTableCell: true): Write realistic generic cell content of similar length. Example: "Volvo Trucks" → "Business Unit A", "Q3 2024" → "[Period]"
 
-Om en shape har "paragraphs" (array av stycken), generera "paragraphRewrites" — en array med en beskrivning per stycke.
-- Tomma stycken i originalet → tom sträng i paragraphRewrites
-- Varje icke-tomt stycke → beskrivande mall-text
+IMPORTANT: Do NOT write meta-descriptions like "Paragraph about how technology has grown organically". Write ACTUAL TEXT that could appear on a consulting slide. The anonymized slide must look visually identical to the original — same amount of text, same structure, same tone.
 
-## JSON-format
+## Multi-paragraph text (paragraphs)
+
+If a shape has "paragraphs" (array of paragraphs), generate "paragraphRewrites" — an array with full replacement text for each paragraph.
+- Empty paragraphs in the original → empty string in paragraphRewrites
+- Each non-empty paragraph → full replacement text of similar length in the same language
+
+## JSON format
 
 { "classifications": [
-  { "id": 0, "category": "title", "rewrite": "Rubrik om centralisering av kärnkompetenser för att balansera snabbhet och styrning" },
-  { "id": 1, "category": "body", "paragraphRewrites": ["Stycke om hur teknik vuxit organiskt och skapat siloeffekter", "", "Mening om varför centralisering av plattformar nu behövs"] },
-  { "id": 2, "category": "name", "rewrite": "[Projektledare]" },
-  { "id": 3, "category": "label_value", "label": "Driver", "rewrite": "namn på ansvarig person" },
+  { "id": 0, "category": "title", "rewrite": "Centralizing Core Capabilities to Balance Speed and Governance" },
+  { "id": 1, "category": "body", "paragraphRewrites": ["Technology has emerged organically across the organization in pockets of high maturity, such as specific business units or operational functions. However, this fragmented growth has created isolated thinking and inefficient workarounds.", "", "A centralized platform approach is now needed to reduce duplication and enable scalable delivery across the enterprise."] },
+  { "id": 2, "category": "name", "rewrite": "[Project Manager]" },
+  { "id": 3, "category": "label_value", "label": "Driver", "rewrite": "[Team Lead]" },
   { "id": 4, "category": "keep" },
   { "id": 5, "category": "table_header" }
 ] }`;
 
-    const userPrompt = `Klassificera följande shapes:
+    const userPrompt = `Classify the following shapes and generate full replacement text (in the same language as each original):
 
 [${shapeEntries}]`;
 
