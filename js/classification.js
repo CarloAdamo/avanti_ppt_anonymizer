@@ -97,8 +97,10 @@ export async function classifyWithAI(items) {
         const item = { id: idx };
         if (s.paragraphs && s.paragraphs.length > 1) {
             item.paragraphs = s.paragraphs;
+            item.paragraphWordCounts = s.paragraphs.map(p => p.split(/\s+/).filter(Boolean).length);
         } else {
             item.text = s.text;
+            item.wordCount = s.text.split(/\s+/).filter(Boolean).length;
         }
         if (s.isTableCell) item.isTableCell = true;
         return item;
@@ -188,10 +190,12 @@ export function buildRewrites(slideData, classifications) {
             if (classification.paragraphRewrites) {
                 const originalParagraphs = text.split('\r');
                 const aiRewrites = classification.paragraphRewrites;
-                // Match structure: preserve empty lines from original
-                rewrittenText = originalParagraphs.map((p, i) => {
+                // Map AI results back using a running counter for non-empty paragraphs
+                let nonEmptyIdx = 0;
+                rewrittenText = originalParagraphs.map((p) => {
                     if (!p.trim()) return '';
-                    return aiRewrites[i] || '';
+                    const rewrite = aiRewrites[nonEmptyIdx++];
+                    return (rewrite !== undefined) ? rewrite : p;
                 }).join('\r');
             }
             // Priority 2: AI-generated single rewrite

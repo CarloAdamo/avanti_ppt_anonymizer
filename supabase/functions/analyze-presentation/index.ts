@@ -10,6 +10,8 @@ interface ShapeItem {
   id: number;
   text?: string;
   paragraphs?: string[];
+  wordCount?: number;
+  paragraphWordCounts?: number[];
 }
 
 interface Classification {
@@ -43,9 +45,12 @@ Deno.serve(async (req: Request) => {
 
     // Prepare shapes for GPT
     const shapeEntries = shapes.map(s => {
-      const content = s.paragraphs
-        ? `"paragraphs": ${JSON.stringify(s.paragraphs)}`
-        : `"text": ${JSON.stringify(s.text)}`;
+      let content: string;
+      if (s.paragraphs) {
+        content = `"paragraphs": ${JSON.stringify(s.paragraphs)}, "paragraphWordCounts": ${JSON.stringify(s.paragraphWordCounts)}`;
+      } else {
+        content = `"text": ${JSON.stringify(s.text)}, "wordCount": ${s.wordCount ?? 0}`;
+      }
       const tablePart = (s as any).isTableCell ? `, "isTableCell": true` : '';
       return `{ "id": ${s.id}, ${content}${tablePart} }`;
     }).join(",\n");
@@ -72,7 +77,7 @@ For each shape (except keep and table_header), generate a "rewrite" field with F
 
 - **title**: Write a complete heading of approximately the same length. Replace specific details with generic alternatives. Example: "Volvo Q3 Strategy Review" → "Quarterly Strategy Review for the Organization"
 - **body** (short text, 1 sentence): Write a complete sentence of similar length. Replace identifying details but keep the meaning and tone.
-- **body** (longer text): Write complete replacement text with APPROXIMATELY THE SAME WORD COUNT as the original. Keep the same structure (bullet points stay as bullet points, paragraphs stay as paragraphs). Replace all identifying details with generic but realistic consulting language.
+- **body** (longer text): Write complete replacement text. Each shape includes a wordCount (or paragraphWordCounts for multi-paragraph). Your replacement MUST match this count within ±2 words. Keep the same structure (bullet points stay as bullet points, paragraphs stay as paragraphs). Replace all identifying details with generic but realistic consulting language.
 - **name**: A generic role title in the SAME LANGUAGE as the original, e.g. "[Project Manager]" for English text, "[Projektledare]" for Swedish text, "[Konsult]", "[Avdelningschef]"
 - **label_value**: Write a realistic generic value. Example: "45 MSEK" → "[X] MSEK", "Erik Svensson" → "[Project Manager]"
 - **Table cells** (have isTableCell: true): Write realistic generic cell content of similar length. Example: "Volvo Trucks" → "Business Unit A", "Q3 2024" → "[Period]"
@@ -81,15 +86,16 @@ IMPORTANT: Do NOT write meta-descriptions like "Paragraph about how technology h
 
 ## Multi-paragraph text (paragraphs)
 
-If a shape has "paragraphs" (array of paragraphs), generate "paragraphRewrites" — an array with full replacement text for each paragraph.
-- Empty paragraphs in the original → empty string in paragraphRewrites
-- Each non-empty paragraph → full replacement text of similar length in the same language
+If a shape has "paragraphs" (array of non-empty paragraphs) and "paragraphWordCounts" (word count per paragraph), generate "paragraphRewrites" — an array with one replacement entry per paragraph.
+- The paragraphs array only contains non-empty paragraphs (empty lines are handled separately by the client)
+- Each paragraph's replacement MUST match the corresponding paragraphWordCounts entry within ±2 words
+- Write full replacement text in the same language as the original
 
 ## JSON format
 
 { "classifications": [
   { "id": 0, "category": "title", "rewrite": "Centralizing Core Capabilities to Balance Speed and Governance" },
-  { "id": 1, "category": "body", "paragraphRewrites": ["Technology has emerged organically across the organization in pockets of high maturity, such as specific business units or operational functions. However, this fragmented growth has created isolated thinking and inefficient workarounds.", "", "A centralized platform approach is now needed to reduce duplication and enable scalable delivery across the enterprise."] },
+  { "id": 1, "category": "body", "paragraphRewrites": ["Technology has emerged organically across the organization in pockets of high maturity, such as specific business units or operational functions. However, this fragmented growth has created isolated thinking and inefficient workarounds.", "A centralized platform approach is now needed to reduce duplication and enable scalable delivery across the enterprise."] },
   { "id": 2, "category": "name", "rewrite": "[Project Manager]" },
   { "id": 3, "category": "label_value", "label": "Driver", "rewrite": "[Team Lead]" },
   { "id": 4, "category": "keep" },
